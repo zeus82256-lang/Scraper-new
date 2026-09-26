@@ -2038,3 +2038,524 @@ register_site(
           'على .com عبر /ajax_novels/chapterlist/{id}.html. السحب بإيقاع بشري '
           '(TWKAN_DELAY_MIN/MAX) + تهدئة متصاعدة لمقاومة تحديد المعدل.'
 )
+
+
+# ==========================================
+# 🛕 10. jwxs (精武小说网 - jwxs.org)
+# ==========================================
+# قالب xbiquge خلف WAF كابتشا GoEdge (يحوّل 307 إلى /WAF/VERIFY/CAPTCHA) من IP
+# السيرفرات — يُتجاوز تلقائياً عبر بروكسي ترجمة جوجل (تم التحقق حياً 200 حقيقية).
+#
+#   كتاب  /book/{id}/                      (البيانات كلها وسوم og:novel:* جاهزة)
+#   فهرس  /xiaoshuo/{id}/ + ترقيم /{صفحة}/ (300 فصلاً بالصفحة — صفحات <option>)
+#   فصل   /xiaoshuo/{id}/{cid}.html        وقد يُقسَّم داخلياً {cid}_2.html (下一页)
+#   المحتوى div#booktxt بفقرات <p> وعلامات مائية مُقحمة تُنظَّف تلقائياً.
+#   الغلاف محجوب 403 مباشرة — يُمرَّر عبر نطاق translate.goog (تم التحقق: image/jpeg 200).
+
+JWXS_BASE = 'https://www.jwxs.org'
+JWXS_MAX_TOC_PAGES = 40       # شبكة أمان لترقيم الفهرس (300 فصل/صفحة)
+JWXS_MAX_CHAPTER_PAGES = 12   # شبكة أمان لتقسيم الفصل الداخلي (_2.html, _3.html ...)
+JWXS_MAX_DUP_PROBES = 8       # أقصى عدد فحوصات لتخمين رابط فصل مفقود من الفهرس
+
+# فئة رموز القمامة المستعملة في العلامات المائية (لا تشمل الترقيم الصيني الكامل
+# ،。！？……（）「」『』《》【】؛ حتى لا تمس النص الأصلي أبداً)
+_JWXS_JUNK = r'''[._\-~*·^%$#@!?&/\\|,:;<>=+()\[\]{}"'`¤￠§×¨※☆★†‡◆★◇◎□■●]'''
+_JWXS_JUNK_RE = re.compile(_JWXS_JUNK)
+# سلسلة مائية: أحرف/كلمات صينية منفردة موصولة برموز قمامة (3+ حلقات)
+_JWXS_WM_RE = re.compile(r'(?:[0-9A-Za-z\u4e00-\u9fff]' + _JWXS_JUNK + r'{1,4}){3,}')
+# شظايا متبقية قصيرة: قمامة 2+ مع كلمات قليلة وبلا علامات صينية كاملة
+_JWXS_FRAG_RE = re.compile(r'\S{4,}')
+
+_JWXS_ZH_DIGITS = {'零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+                   '六': 6, '七': 7, '八': 8, '九': 9, '两': 2}
+_JWXS_ZH_UNITS = {'十': 10, '百': 100, '千': 1000, '万': 10000}
+
+
+def _jwxs_zh_num_to_int(s):
+    """تحويل الأرقام الصينية إلى رقم: 四百九十一 → 491، 二十一 → 21"""
+    try:
+        s = (s or '').strip()
+        if not s:
+            return 0
+        total, section, num = 0, 0, 0
+        for ch in s:
+            if ch in _JWXS_ZH_DIGITS:
+                num = _JWXS_ZH_DIGITS[ch]
+            elif ch in _JWXS_ZH_UNITS:
+                u = _JWXS_ZH_UNITS[ch]
+                if u == 10000:
+                    section = (section + num) * 10000 if (section or num) else 10000
+                    total += section
+                    section, num = 0, 0
+                else:
+                    section += (num if num else 1) * u
+                    num = 0
+            else:
+                return 0
+        return total + section + num
+    except Exception:
+        return 0
+
+
+def _jwxs_chapter_number(title):
+    """رقم الفصل من عنوانه: 第5章 → 5، 第五章 → 5، 第四百九十一章 → 491"""
+    if not title:
+        return 0
+    m = re.search(r'第\s*(\d+)\s*[章回节節]', title)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return 0
+    m = re.search(r'第\s*([零一二三四五六七八九十百千万两]+)\s*[章回节節]', title)
+    if m:
+        return _jwxs_zh_num_to_int(m.group(1))
+    return 0
+
+
+def _jwxs_validate(body):
+    """كاشف الصفحات الحقيقية — يرفض صفحة كابتشا GoEdge وأي صفحة بلا بصمة الموقع"""
+    if not body:
+        return False
+    if 'GOEDGE_WAF' in body or 'WAF/VERIFY' in body:
+        return False
+    return ('精武小说网' in body or 'id="booktxt"' in body
+            or '章节列表' in body or '/xiaoshuo/' in body)
+
+
+def _jwxs_get(url, timeout=30):
+    """طلب موحّد عبر التوجيه الذكي مع كاشف كابتشا GoEdge"""
+    return smart_get(url, sl='zh-CN', tl='en', lang='zh-CN,zh;q=0.9',
+                     timeout=timeout, validate=_jwxs_validate, ua=UA_FIREFOX)
+
+
+def _jwxs_book_id(url):
+    """معرف الكتاب من أي رابط (كتاب /book/{id}/ أو فصل /xiaoshuo/{id}/{cid}.html)"""
+    m = re.search(r'/book/(\d+)', url) or re.search(r'/xiaoshuo/(\d+)', url)
+    return m.group(1) if m else None
+
+
+def _jwxs_via_translate(path):
+    """بناء رابط يعمل من IP السيرفرات عبر نطاق translate.goog (للأغلفة المحجوبة 403)"""
+    return f"https://www-jwxs-org.translate.goog{path}?_x_tr_sl=auto&_x_tr_tl=en&_x_tr_hl=en"
+
+
+def _jwxs_clean_text(text):
+    """تنظيف العلامات المائية المُقحمة داخل الفقرات (أسماء مواقع مسروقة منها الفصول)
+    أمثلة حية: _s?j·k~s*a/p,p~.?c*o?m-  و  /?小??×说§:C%¤M*S￠D| @首?}发&"""
+    if not text:
+        return text
+
+    # روابط/نطاقات صريحة (جديدة على العلامات المائية)
+    text = re.sub(r'(?:https?://|www\.)[^\s，。！？；；，]*', '', text)
+    text = re.sub(r'[a-z0-9\-]{2,20}\.(?:com|org|net|cc|info|xyz|top|vip|site|club'
+                  r'|icu|buzz|one|ltd|shop|link|us|la|me|tw)\b', '', text,
+                  flags=re.IGNORECASE)
+
+    # سلسلة مائية: أحرف/كلمات صينية منفردة موصولة برموز قمامة (3+ حلقات)
+    text = _JWXS_WM_RE.sub('', text)
+
+    # بقايا رموز قمامة ملتصقة بعلامات الترقيم الصينية الكاملة (。/ مثلاً)
+    # أو معزولة بين الفراغات (¨ مثلاً) — دون لمس الكلمات الحقيقية
+    text = re.sub(r'([，。！？；：、“”‘’（）《》【】…—])' + _JWXS_JUNK + r'{1,4}',
+                  r'\1', text)
+    text = re.sub(r'(?<=[\s，。！？；：、])' + _JWXS_JUNK + r'{1,3}'
+                  r'(?=[\s，。！？；：、]|$)', '', text)
+
+    def _frag_repl(m):
+        s = m.group(0)
+        junk_n = len(_JWXS_JUNK_RE.findall(s))
+        word_n = len(re.findall(r'[0-9A-Za-z\u4e00-\u9fff]', s))
+        # شظية قمامة: رموز قمامة كثيرة، كلمات منفردة قليلة، بلا علامات صينية كاملة
+        if junk_n >= 2 and word_n <= 6 and '，' not in s and '。' not in s \
+                and '！' not in s and '？' not in s and '、' not in s:
+            return ''
+        return s
+
+    lines = []
+    for ln in text.split('\n'):
+        ln = _JWXS_FRAG_RE.sub(_frag_repl, ln)
+        # تنظيف بقايا القمامة على الأطراف (بعد إزالة الفراغات حتى لا تحجبها عن النهايات)
+        ln = re.sub(r'^' + _JWXS_JUNK + r'+|' + _JWXS_JUNK + r'+$', '', ln.strip()).strip()
+        if ln:
+            lines.append(ln)
+    # إزالة الأسطر الفارغة المكررة
+    out, prev_empty = [], False
+    for ln in lines:
+        if not ln:
+            if prev_empty:
+                continue
+            prev_empty = True
+        else:
+            prev_empty = False
+        out.append(ln)
+    return '\n\n'.join(out)
+
+
+def fetch_metadata_jwxs(url):
+    try:
+        bid = _jwxs_book_id(url)
+        if not bid:
+            print("jwxs: cannot extract book id")
+            return None
+        book_url = f"{JWXS_BASE}/book/{bid}/"
+        response = _jwxs_get(book_url)
+        if response is None:
+            print("jwxs: metadata fetch failed (all routes)")
+            return None
+        soup = parse_html(response)
+
+        title = get_meta(soup, prop='og:novel:book_name') \
+            or get_meta(soup, prop='og:title')
+        if not title:
+            h1 = soup.find('h1')
+            title = h1.get_text(strip=True) if h1 else "Unknown Title"
+
+        author = get_meta(soup, prop='og:novel:author') or ""
+        category = get_meta(soup, prop='og:novel:category') or "عام"
+        description = get_meta(soup, prop='og:description')
+        if not description:
+            intro = soup.select_one('#intro')
+            description = intro.get_text('\n', strip=True) if intro else ""
+
+        raw_status = get_meta(soup, prop='og:novel:status') or ""
+        status = "مكتملة" if ('完' in raw_status or '已' in raw_status) else "مستمرة"
+
+        # الغلاف: img#fmimg data-original (صورة lazy) ثم og:image — وكلاهما
+        # محجوب 403 من IP السيرفرات، فنمرره عبر نطاق translate.goog المتحقق منه
+        cover = ""
+        img_tag = soup.select_one('#fmimg img')
+        if img_tag:
+            cover = img_tag.get('data-original') or img_tag.get('src') or ""
+        if not cover:
+            cover = get_meta(soup, prop='og:image') or ""
+        if cover and cover.startswith('http'):
+            path = urlparse(cover).path
+            if path:
+                cover = _jwxs_via_translate(path)
+        elif cover:
+            cover = fix_image_url(cover, base_url=JWXS_BASE)
+
+        tags = [category] if category and category != "عام" else []
+
+        return {
+            'title': title, 'author': author,
+            'description': description.strip(), 'cover': cover,
+            'status': status, 'category': category, 'tags': tags,
+            'book_id': bid,
+            'sourceUrl': book_url,
+            'lastUpdate': get_meta(soup, prop='og:novel:update_time') or None
+        }
+    except Exception as e:
+        print(f"Error jwxs metadata: {e}")
+        return None
+
+
+def _jwxs_h1_chapter_number(html):
+    """رقم الفصل من <h1> الصفحة (第4章 ...（2/2）) — 0 إن لم وُجد/صفحة زبالة"""
+    m = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.S)
+    if not m:
+        return 0
+    return _jwxs_chapter_number(re.sub(r'<[^>]+>', '', m.group(1)))
+
+
+def _jwxs_next_chapter_from_soup(soup, bid):
+    """استخراج رابط 下一章 من صفحة محمَّلة (يجب أن يكون لنفس الكتاب)"""
+    for a in soup.find_all('a', href=True):
+        if a.get_text(strip=True) == '下一章':
+            m = re.search(r'/xiaoshuo/' + bid + r'/\d+\.html', a['href'])
+            if m:
+                return JWXS_BASE + m.group(0)
+    return None
+
+
+def _jwxs_next_page_from_soup(soup, bid):
+    """استخراج رابط 下一页 الداخلي (تقسيم الفصل) إن وجد"""
+    for a in soup.find_all('a', href=True):
+        if a.get_text(strip=True) == '下一页' and re.search(
+                r'/xiaoshuo/' + bid + r'/\d+_\d+\.html', a['href']):
+            return urljoin(JWXS_BASE + '/', a['href'])
+    return None
+
+
+def _jwxs_last_page_next_chapter(url, bid, prev_num=None):
+    """رابط الفصل التالي الحقيقي (下一章) — موجود فقط في آخر صفحة من الفصل
+    (الفصول المقسمة تضع 下一章 في صفحتها الأخيرة فقط). المسار السريع: تجربة
+    {cid}_2.html مباشرة (الحالة الغالبة — أغلب الفصول صفحتان) مع تحقق من رقم
+    الفصل في <h1> حتى لا نقبل صفحات زبالة/كتب أخرى، ثم المسار الأساسي بالتتبع."""
+    # ---------- المسار السريع: تخمين الصفحة الثانية مباشرة ----------
+    m = re.search(r'/xiaoshuo/' + bid + r'/(\d+)\.html$', url)
+    if m and prev_num:
+        cid = m.group(1)
+        resp = _jwxs_get(f"{JWXS_BASE}/xiaoshuo/{bid}/{cid}_2.html", timeout=25)
+        if resp is not None and _jwxs_h1_chapter_number(resp.text) == prev_num:
+            soup = parse_html(resp)
+            nxt = _jwxs_next_chapter_from_soup(soup, bid)
+            if nxt and nxt != url:
+                return nxt
+            # _2 ليست الأخيرة (فصل من 3+ صفحات) — نكمل التتبع من عندها
+            current = _jwxs_next_page_from_soup(soup, bid)
+            if current:
+                return _jwxs_last_page_next_chapter(current, bid)
+            return None
+
+    # ---------- المسار الأساسي: تتبع 下一页 من الصفحة الأولى ----------
+    current = url
+    for _ in range(JWXS_MAX_CHAPTER_PAGES):
+        resp = _jwxs_get(current, timeout=30)
+        if resp is None:
+            return None
+        soup = parse_html(resp)
+        nxt = _jwxs_next_chapter_from_soup(soup, bid)
+        if nxt and nxt != current:
+            return nxt
+        np = _jwxs_next_page_from_soup(soup, bid)
+        if not np:
+            return None
+        current = np
+    return None
+
+
+def _jwxs_probe_missing(bid, want_num, want_title, lo_cid, hi_cid):
+    """احتياط عند فشل 下一章: فحص الروابط المجهولة في الفجوة بين cid الفصل
+    السابق ومدخل الفهرس المعروف التالي حتى نجد عنواناً يطابق رقم الفصل المطلوب
+    (رقم + تشابه نصي في العنوان حتى لا نأخذ فصلاً بكتاب آخر بنفس الرقم)"""
+    try:
+        lo, hi = int(lo_cid), int(hi_cid)
+    except (TypeError, ValueError):
+        return None
+    if hi - lo <= 1:
+        return None
+    hi = min(hi, lo + 1 + JWXS_MAX_DUP_PROBES)
+    want_words = set(re.findall(r'[\u4e00-\u9fff]{2,}', want_title or ''))
+    for cid in range(lo + 1, hi):
+        cand = f"{JWXS_BASE}/xiaoshuo/{bid}/{cid}.html"
+        time.sleep(random.uniform(0.6, 1.2))
+        resp = _jwxs_get(cand, timeout=20)
+        if resp is None:
+            continue
+        m = re.search(r'<h1[^>]*>(.*?)</h1>', resp.text, re.S)
+        if not m:
+            continue
+        h1_title = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+        if not want_num or _jwxs_chapter_number(h1_title) != want_num:
+            continue
+        h1_words = set(re.findall(r'[\u4e00-\u9fff]{2,}', h1_title))
+        overlap = len(want_words & h1_words)
+        if not want_words or overlap >= max(1, len(want_words) // 2):
+            print(f"   🔧 jwxs probe hit: ch{want_num} at cid {cid}")
+            return cand
+    return None
+
+
+def fetch_chapter_list_jwxs(url):
+    """الفهرس الكامل من /xiaoshuo/{id}/ مع ترقيم صفحات (300 فصل/صفحة، حدود <option>).
+    ⚠️ علة معروفة في الموقع: كل مدخل خامس تقريباً في الفهرس يكرر رابط الفصل السابق
+    (رابط الفصل الحقيقي مفقود من الفهرس نفسه). نحسم الرابط الحقيقي عبر 下一章 في
+    آخر صفحة من الفصل السابق، مع فحص احتياطي للفجوة بين معرفات الفصول المجاورة."""
+    chapters = []
+    try:
+        bid = _jwxs_book_id(url)
+        if not bid:
+            print("jwxs: cannot extract book id for chapter list")
+            return []
+
+        toc_url = f"{JWXS_BASE}/xiaoshuo/{bid}/"
+        response = _jwxs_get(toc_url, timeout=35)
+        if response is None:
+            print("jwxs: TOC page 1 failed (all routes)")
+            return []
+        soup = parse_html(response)
+
+        def _parse_toc_page(soup_obj):
+            found = []
+            for a in soup_obj.find_all('a', href=re.compile(
+                    r'/xiaoshuo/' + bid + r'/\d+\.html')):
+                title = a.get_text(' ', strip=True)
+                href = a.get('href', '')
+                if not title or not href:
+                    continue
+                cid_m = re.search(r'/xiaoshuo/' + bid + r'/(\d+)\.html', href)
+                if not cid_m:
+                    continue
+                found.append({'cid': cid_m.group(1), 'title': title,
+                              'href': href})
+            return found
+
+        entries = _parse_toc_page(soup)
+        if not entries:
+            print("jwxs: no chapter entries on TOC page 1")
+            return []
+
+        # اكتشاف عدد صفحات الفهرس من <option value="/xiaoshuo/{id}/N/">N - M章</option>
+        total_pages = 1
+        for opt in soup.find_all('option'):
+            val = opt.get('value', '')
+            m = re.search(r'/xiaoshuo/' + bid + r'/(\d+)/?', val)
+            if m:
+                total_pages = max(total_pages, int(m.group(1)))
+        total_pages = min(total_pages, JWXS_MAX_TOC_PAGES)
+
+        for page in range(2, total_pages + 1):
+            time.sleep(random.uniform(0.8, 1.6))
+            p_url = f"{JWXS_BASE}/xiaoshuo/{bid}/{page}/"
+            p_resp = _jwxs_get(p_url, timeout=35)
+            if p_resp is None:
+                print(f"jwxs: TOC page {page}/{total_pages} failed — continuing")
+                continue
+            more = _parse_toc_page(parse_html(p_resp))
+            if not more:
+                break
+            entries.extend(more)
+
+        print(f"jwxs: {len(entries)} TOC entries across {total_pages} page(s) "
+              f"— resolving duplicates if any ...")
+
+        seq = 0
+        fixed_dups = 0
+        dropped = 0
+        prev_entry = None
+        prev_resolved_url = None
+        for e in entries:
+            seq += 1
+            url = JWXS_BASE + (urlparse(e['href']).path
+                               or f"/xiaoshuo/{bid}/{e['cid']}.html")
+
+            # علة الموقع: مدخل يشترك مع سابقه في نفس الرابط — الرابط الحقيقي
+            # يُستخرج من 下一章 في آخر صفحة من الفصل السابق المحسوم
+            if prev_entry is not None and e['cid'] == prev_entry['cid'] \
+                    and prev_resolved_url:
+                time.sleep(random.uniform(0.4, 0.9))
+                real = _jwxs_last_page_next_chapter(
+                    prev_resolved_url, bid,
+                    prev_num=_jwxs_chapter_number(prev_entry['title']))
+                if real and real != prev_resolved_url:
+                    url = real
+                    fixed_dups += 1
+                else:
+                    # احتياط: فحص الفجوة بين cid السابق والتالي المعروف
+                    nxt_known = None
+                    for nxt_e in entries[seq:]:
+                        if nxt_e['cid'] != e['cid']:
+                            nxt_known = nxt_e['cid']
+                            break
+                    want = _jwxs_chapter_number(e['title'])
+                    probed = _jwxs_probe_missing(
+                        bid, want, e['title'],
+                        prev_entry['cid'], nxt_known) if nxt_known else None
+                    if probed:
+                        url = probed
+                        fixed_dups += 1
+                    else:
+                        dropped += 1
+                        print(f"   ⚠️ jwxs: could not resolve duplicate TOC "
+                              f"entry '{e['title'][:40]}' — dropped (will "
+                              f"succeed on a later re-run)")
+                        prev_entry, prev_resolved_url = e, prev_resolved_url
+                        continue
+
+            # تعارض الرابط المحسوم مع ما سبقه = فشل الحسم نفسه
+            if any(c['url'] == url for c in chapters):
+                dropped += 1
+                print(f"   ⚠️ jwxs: resolved URL still duplicated for "
+                      f"'{e['title'][:40]}' — dropped")
+                prev_entry, prev_resolved_url = e, url
+                continue
+
+            # الترقيم النهائي = موضع المدخل في الفهرس (ترتيب الموقع نفسه هو المرجع)
+            # أرقام العناوين فوضوية في هذا الموقع (في الرواية المختبرة: 10 أرقام
+            # مكررة و10 ناقصة بسبب إعادة ترقيم المؤلف) فلا يُعتمد عليها؛ الأرقام
+            # بالمواضع حتمية ومستقرة بين الجولات (الاستئناف يعمل بها) والعنوان
+            # الأصلي يبقى محفوظاً كما هو.
+            num = seq
+
+            chapters.append({'number': num, 'url': url, 'title': e['title']})
+            prev_entry, prev_resolved_url = e, url
+
+        chapters.sort(key=lambda x: x['number'])
+        print(f"✅ jwxs chapters found: {len(chapters)} "
+              f"(toc pages: {total_pages}, dup-links fixed: {fixed_dups}, "
+              f"dropped: {dropped})")
+        return chapters
+    except Exception as e:
+        print(f"Error jwxs chapter list: {e}")
+        return chapters
+
+
+def scrape_chapter_jwxs(url):
+    """سحب فصل كامل مع متابعة التقسيم الداخلي {cid}_2.html عبر رابط 下一页"""
+    try:
+        cid_m = re.search(r'/xiaoshuo/\d+/(\d+)', url)
+        if not cid_m:
+            return None
+        cid = cid_m.group(1)
+
+        parts = []
+        current = url
+        for _page in range(1, JWXS_MAX_CHAPTER_PAGES + 1):
+            response = _jwxs_get(current, timeout=30)
+            if response is None:
+                return None
+            soup = parse_html(response)
+            content = soup.select_one('#booktxt') or soup.select_one('#content')
+            if content is None:
+                return None
+
+            for bad in content.find_all(['script', 'style', 'ins', 'iframe', 'a']):
+                bad.decompose()
+            for p in content.find_all('p'):
+                if not p.get_text(strip=True):
+                    p.decompose()
+
+            text = content.get_text('\n', strip=True)
+            text = _jwxs_clean_text(text)
+            if text.strip():
+                parts.append(text.strip())
+
+            # التقسيم الداخلي: رابط 下一页 يشير لنفس cid بصيغة {cid}_N.html
+            next_a = None
+            for a in soup.find_all('a', href=True):
+                if a.get_text(strip=True) != '下一页':
+                    continue
+                if re.search(r'/' + cid + r'_\d+\.html', a['href']):
+                    next_a = a['href']
+                    break
+            if not next_a:
+                break
+            next_a = urljoin(JWXS_BASE + '/', next_a)
+            if next_a == current:
+                break
+            current = next_a
+            time.sleep(random.uniform(0.8, 1.6))
+
+        full = '\n\n'.join(parts)
+        full = clean_text(full)
+        if len(full.strip()) < 50:
+            return None
+        return full
+    except Exception as e:
+        print(f"Error jwxs chapter: {e}")
+        return None
+
+
+def worker_jwxs(url, admin_email, metadata):
+    generic_worker(url, admin_email, metadata,
+                   fetch_chapter_list_jwxs, scrape_chapter_jwxs,
+                   batch_size=5, delay=1.2, site_name='jwxs (精武小说网)')
+
+
+register_site(
+    domain_patterns=['jwxs.org', 'www.jwxs.org'],
+    name='jwxs (精武小说网)',
+    language='chinese',
+    fetch_metadata=fetch_metadata_jwxs,
+    fetch_chapters=fetch_chapter_list_jwxs,
+    fetch_content=scrape_chapter_jwxs,
+    worker=worker_jwxs,
+    status='active',
+    notes='قالب xbiquge خلف WAF كابتشا GoEdge (تحويل 307 إلى /WAF/VERIFY/CAPTCHA) '
+          'من IP السيرفرات — يعمل تلقائياً عبر بروكسي ترجمة جوجل داخل smart_get. '
+          'الفهرس الكامل /xiaoshuo/{id}/ بترقيم صفحات (300 فصل/صفحة)، والفصل قد يُقسَّم '
+          'داخلياً {cid}_2.html ويُتابع تلقائياً. العلامات المائية المسروقة تُنظَّف، '
+          'والأغلفة تُمرَّر عبر translate.goog لأنها محجوبة 403 مباشرة.'
+)
