@@ -1432,6 +1432,21 @@ register_site(
 TWKAN_MAX_LIST_PAGES = 120  # شبكة أمان لترقيم فهرس twkan.cc (501 فصلاً/صفحة)
 
 
+def _twkan_true_number(title, fallback):
+    """الرقم الحقيقي للفصل من عنوانه (第N章) بدل الترقيم التسلسلي.
+    يلغي انحراف الترقيم بين قائمة twkan.com وتوأمها twkan.cc:
+    القائمتان تختلفان في عدد الانقسامات (1144 مقابل 1147 مدخلاً لنفس الرواية)
+    فكان الاستئناف يقفز/يكرر فصولاً. الفصول بلا رقم في العنوان (خاتمة/خارجية)
+    تأخذ الترقيم التسلسلي كاحتياط."""
+    try:
+        m = re.search(r'第\s*(\d+)\s*[章回节節]', title or '')
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return fallback
+
+
 def _twkan_validate(body):
     """كاشف صفحات الخداع/التحدي — يقبل القالبين ويرفض أي صفحة بلا بصمة الموقع"""
     if not body:
@@ -1618,7 +1633,7 @@ def _twkan_chapters_new(url, bid):
     """فهرس twkan.cc: صفحات متتابعة /chapter/{id}[/{صفحة}].html"""
     base = get_base_url(url)
     bid_q = re.escape(bid)
-    chapters, seen = [], set()
+    chapters, seen, used_nums = [], set(), set()
     index = 0
     page_no = 1
     while page_no <= TWKAN_MAX_LIST_PAGES:
@@ -1639,10 +1654,15 @@ def _twkan_chapters_new(url, bid):
             if full in seen:
                 continue
             seen.add(full)
+            title = a.get_text(strip=True)
             index += 1
             page_new += 1
-            chapters.append({'number': index, 'url': full,
-                             'title': a.get_text(strip=True)})
+            # الرقم الحقيقي من العنوان — يوحّد الترقيم مع twkan.com
+            num = _twkan_true_number(title, index)
+            while num in used_nums:
+                num += 1
+            used_nums.add(num)
+            chapters.append({'number': num, 'url': full, 'title': title})
 
         if page_new == 0:
             break  # لا فصول جديدة = آخر صفحة
@@ -1658,10 +1678,11 @@ def _twkan_chapters_old(url, bid):
     list_url = f"{base}/ajax_novels/chapterlist/{bid}.html"
     response = _twkan_get(list_url, timeout=40)
     if response is None or response.status_code != 200:
+        print(f"   ⚠️ twkan.com AJAX list failed ({list_url})")
         return []
     soup = parse_html(response)
 
-    chapters, seen = [], set()
+    chapters, seen, used_nums = [], set(), set()
     index = 0
     for a in soup.find_all('a', href=True):
         href = a['href']
@@ -1672,10 +1693,16 @@ def _twkan_chapters_old(url, bid):
         if full in seen:
             continue
         seen.add(full)
+        title = a.get_text(strip=True)
         index += 1
-        chapters.append({'number': index, 'url': full,
-                         'title': a.get_text(strip=True)})
+        # الرقم الحقيقي من العنوان — يوحّد الترقيم مع التوأم ويمنع فجوات الاستئناف
+        num = _twkan_true_number(title, index)
+        while num in used_nums:
+            num += 1
+        used_nums.add(num)
+        chapters.append({'number': num, 'url': full, 'title': title})
 
+    print(f"   📋 twkan.com AJAX list parsed: {len(chapters)} chapters")
     return chapters
 
 
@@ -1760,17 +1787,42 @@ def scrape_chapter_twkan(url):
 def worker_twkan(url, admin_email, metadata):
     """عامل مخصص: منطق generic_worker + ذكاء إضافي —
     إذا حجب خداع Cloudflare فهرس twkan.com، يبحث عن توأم الكتاب على twkan.cc
-    (نفس قاعدة البيانات، مفتوح بدون حماية) ويسحب الفصول والمحتوى منه مباشرة"""
+    (نفس قاعدة البيانات، مفتوح بدون حماية) ويسحب الفصول والمحتوى منه مباشرة.
+    مقاوم للأعطال: إعادة محاولة الإرسال، سجل صريح لكل فشل محتوى، توقف آمن
+    بدل التسريب الصامت للحزم — الفصول غير المرسلة يعيد السكرابر سحبها في الجولة القادمة."""
     from core.backend import send_data_to_backend, check_existing_chapters
+
+    BATCH_SIZE = 5
+
+    def _send_batch(payload, first_num, last_num, attempts=3):
+        """إرسال حزمة مع إعادة محاولة وتراجع زمني — فشل صامت = فصول ضائعة للأبد"""
+        delays = [5, 15]
+        for attempt in range(1, attempts + 1):
+            try:
+                if send_data_to_backend(payload):
+                    return True
+                print(f"   ⚠️ backend refused batch [{first_num}-{last_num}] "
+                      f"(attempt {attempt}/{attempts}) — HTTP not 200")
+            except Exception as e:
+                print(f"   ⚠️ backend send error [{first_num}-{last_num}] "
+                      f"(attempt {attempt}/{attempts}): {e}")
+            if attempt < attempts:
+                time.sleep(delays[min(attempt - 1, len(delays) - 1)])
+        print(f"   🛑 BACKEND UNREACHABLE after {attempts} attempts — chapters "
+              f"[{first_num}-{last_num}] NOT saved. Stopping worker safely; "
+              f"these chapters will be re-scraped on the next run.")
+        return False
 
     try:
         existing_chapters = check_existing_chapters(metadata['title'])
     except Exception:
         existing_chapters = []
+    existing_set = set(existing_chapters)
     skip_meta = len(existing_chapters) > 0
 
     if existing_chapters:
-        print(f"📚 Novel exists in app DB: {len(existing_chapters)} chapters (max #{max(existing_chapters)}) — skipping them, resuming after")
+        print(f"📚 Novel exists in app DB: {len(existing_chapters)} chapters "
+              f"(max #{max(existing_chapters)}) — skipping them, resuming the gaps")
 
     send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata,
                           'chapters': [], 'skipMetadataUpdate': skip_meta})
@@ -1792,30 +1844,71 @@ def worker_twkan(url, admin_email, metadata):
         print(f"No chapters found for {metadata['title']}")
         return
 
-    print(f"Processing {len(all_chapters)} chapters.")
-    batch = []
-    for chap in all_chapters:
-        if chap['number'] in existing_chapters:
-            continue
+    to_scrape = [c for c in all_chapters if c['number'] not in existing_set]
+    skipped = len(all_chapters) - len(to_scrape)
+    print(f"Processing {len(all_chapters)} chapters — "
+          f"{skipped} already in DB, {len(to_scrape)} to scrape now.")
 
+    stats = {'scraped': 0, 'failed': 0, 'sent': 0, 'batches': 0}
+    batch = []
+    consec_fail = 0
+
+    def _flush():
+        """إرسال الحزمة الحالية؛ عند فشل مستمر يتوقف العامل بأمان بدل مواصلة السحب بلا فائدة"""
+        if not batch:
+            return True
+        nums = [c['number'] for c in batch]
+        payload = {'adminEmail': admin_email, 'novelData': metadata,
+                   'chapters': list(batch), 'skipMetadataUpdate': True}
+        if _send_batch(payload, min(nums), max(nums)):
+            stats['sent'] += len(batch)
+            stats['batches'] += 1
+            batch.clear()
+            time.sleep(1.0)
+            return True
+        return False
+
+    for chap in to_scrape:
         print(f"Scraping {metadata.get('title', '?')}: Ch {chap['number']}...")
         try:
             content = scrape_chapter_twkan(chap['url'])
         except Exception as e:
-            print(f"❌ content failed: {e}")
+            print(f"   ❌ content exception: {e}")
             content = None
 
-        if content:
-            batch.append({'number': chap['number'], 'title': chap['title'], 'content': content})
-            if len(batch) >= 5:
-                send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata,
-                                      'chapters': batch, 'skipMetadataUpdate': True})
-                batch = []
-                time.sleep(1.0)
+        # إعادة محاولة واحدة بعد مهلة قصيرة (أخطاء عابرة/خداع متقطع)
+        if not content:
+            time.sleep(2)
+            try:
+                content = scrape_chapter_twkan(chap['url'])
+            except Exception:
+                content = None
 
-    if batch:
-        send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata,
-                              'chapters': batch, 'skipMetadataUpdate': True})
+        if content:
+            stats['scraped'] += 1
+            consec_fail = 0
+            batch.append({'number': chap['number'], 'title': chap['title'],
+                          'content': content})
+            if len(batch) >= BATCH_SIZE and not _flush():
+                return
+        else:
+            stats['failed'] += 1
+            consec_fail += 1
+            print(f"   ❌ Ch {chap['number']}: content failed "
+                  f"(consecutive: {consec_fail}) — chapter skipped this run")
+            if consec_fail >= 3:
+                print("   😴 cooling down 15s (possible rate-limit) ...")
+                time.sleep(15)
+            if consec_fail >= 10:
+                print(f"🛑 10 consecutive content failures — aborting. "
+                      f"scraped={stats['scraped']}, failed={stats['failed']}. "
+                      f"Next run resumes the gaps.")
+                return
+
+    _flush()
+    print(f"✅ twkan worker finished: scraped={stats['scraped']} "
+          f"sent={stats['sent']} failed={stats['failed']} "
+          f"skipped(existing)={skipped} batches={stats['batches']}")
 
 
 register_site(
