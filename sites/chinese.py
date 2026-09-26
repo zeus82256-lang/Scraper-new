@@ -1563,6 +1563,28 @@ def _twkan_meta_old(soup, book_url):
             'author': author, 'status': status, 'category': category, 'tags': tags}
 
 
+def _twkan_cover_via_twin(title, book_url):
+    """غلاف بديل من التوأم twkan.cc — غلاف twkan.com محجوب بـ Cloudflare
+    (403 حتى للسيرفر وCloudinary) بينما CDN التوأم img.cuoceng.com مفتوح"""
+    try:
+        host = (urlparse(book_url).netloc or '').lower()
+        if 'twkan.cc' in host:
+            return ""  # غلاف .cc يعمل مباشرة — لا حاجة للتوأم
+        twin = _twkan_find_cc_twin(title or '')
+        if not twin:
+            return ""
+        r = _twkan_get(twin)
+        if r is None or r.status_code != 200:
+            return ""
+        soup = parse_html(r)
+        img = soup.select_one('div.bookcover img') or soup.select_one('img.thumbnail')
+        if img:
+            return (img.get('src') or img.get('data-src') or '').strip()
+    except Exception:
+        return ""
+    return ""
+
+
 def fetch_metadata_twkan(url):
     try:
         book_url = _twkan_book_url(url)
@@ -1579,6 +1601,13 @@ def fetch_metadata_twkan(url):
         if meta:
             meta['sourceUrl'] = book_url
             meta['lastUpdate'] = None
+            # 🔥 غلاف twkan.com محجوب بـ Cloudflare (403 للسيرفر والتطبيق معاً)
+            # → استبدله بغلاف التوأم من CDN twkan.cc المفتوح
+            if meta.get('cover') and 'twkan.com' in str(meta.get('cover', '')):
+                twin_cover = _twkan_cover_via_twin(meta.get('title', ''), book_url)
+                if twin_cover:
+                    print("   🖼️ cover blocked by Cloudflare — using twin CDN cover")
+                    meta['cover'] = twin_cover
         return meta
     except Exception as e:
         print(f"Error twkan metadata: {e}")
@@ -1739,6 +1768,9 @@ def worker_twkan(url, admin_email, metadata):
     except Exception:
         existing_chapters = []
     skip_meta = len(existing_chapters) > 0
+
+    if existing_chapters:
+        print(f"📚 Novel exists in app DB: {len(existing_chapters)} chapters (max #{max(existing_chapters)}) — skipping them, resuming after")
 
     send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata,
                           'chapters': [], 'skipMetadataUpdate': skip_meta})

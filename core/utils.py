@@ -762,6 +762,9 @@ def madara_worker(url, admin_email, metadata, use_cookies=False):
     existing_chapters = check_existing_chapters(metadata['title'])
     skip_meta = len(existing_chapters) > 0
 
+    if existing_chapters:
+        print(f"📚 Novel exists in app DB: {len(existing_chapters)} chapters (max #{max(existing_chapters)}) — skipping them, resuming after")
+
     send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
 
     all_chapters = madara_fetch_chapter_list(metadata.get('novel_id'), url, use_cookies=use_cookies)
@@ -815,6 +818,9 @@ def generic_worker(url, admin_email, metadata, chapters_fn, content_fn,
     except Exception:
         existing_chapters = []
     skip_meta = len(existing_chapters) > 0
+
+    if existing_chapters:
+        print(f"📚 Novel exists in app DB: {len(existing_chapters)} chapters (max #{max(existing_chapters)}) — skipping them, resuming after")
 
     send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
 
