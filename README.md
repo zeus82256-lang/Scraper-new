@@ -386,12 +386,16 @@ register_site(
 دالة `smart_get(url)` تجرب الطرق بالترتيب وتحفظ الطريقة الناجحة لكل نطاق (ذاكرة مؤقتة لتسريع سحب الفصول):
 
 ```
-1) الطلب المباشر          ← الأسرع، يعمل مع معظم المواقع
-2) بروكسي ترجمة جوجل       ← عند الحجب: يجلب الصفحة من شبكة جوجل
+1) الطلب المباشر          ← الأسرع — الآن بانتحال بصمة متصفح حقيقي (curl_cffi)
+   بصمة python-requests مكشوفة ويكشفها Cloudflare فوراً (صفحات challenge)،
+   بانتحال كروم يمر الطلب كمتصفح حقيقي في معظم المواقع
+2) Cloudflare Worker      ← إذا ضبطت CF_WORKER_URL (مجاني 100,000 طلب/يوم —
+   انشر worker خاص بك في دقيقة، الشرح تحت)
+3) بروكسي ترجمة جوجل       ← عند الحجب: يجلب الصفحة من شبكة جوجل
    (fanmtl-com.translate.goog/...) — يُعيد HTML الأصلي بدون ترجمة النص،
    ويعيد كتابة كل الروابط تلقائياً إلى النطاق الأصلي قبل التحليل
-3) FlareSolverr (اختياري)  ← إذا ضبطت FLARESOLVR_URL
-4) ScraperAPI (اختياري)    ← إذا ضبطت SCRAPERAPI_KEY (1000 طلب مجاني شهرياً)
+4) FlareSolverr (اختياري)  ← إذا ضبطت FLARESOLVR_URL
+5) ScraperAPI (اختياري)    ← إذا ضبطت SCRAPERAPI_KEY (1000 طلب مجاني شهرياً)
 ```
 
 كما تتعامل تلقائياً مع:
@@ -437,7 +441,28 @@ register_site(
 **أو أي بروكسي سكني لديك:**
 - `RESIDENTIAL_PROXY=http://user:pass@host:port`
 
-بعد أي منها: FreeWebNovel + ScribbleHub + NovelBin ستعمل تلقائياً (السكرابر يكتشف الإعداد ويستخدمه عند الحاجة).
+**الخيار الأوفر — Cloudflare Worker خاص بك (مجاني 100,000 طلب/يوم):**
+1. أنشئ حساباً مجانياً في `dash.cloudflare.com` → Workers & Pages → Create Worker.
+2. الصق هذا الكود واضغط Deploy:
+
+```js
+export default {
+  async fetch(req) {
+    const u = new URL(req.url).searchParams.get('url');
+    if (!u) return new Response('missing ?url=', { status: 400 });
+    const r = await fetch(u, { redirect: 'follow',
+      headers: { 'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.5' } });
+    return new Response(r.body, { status: r.status, headers: {
+      'Content-Type': r.headers.get('Content-Type') ?? 'text/html; charset=utf-8' } });
+  }
+}
+```
+
+3. انسخ رابط الـ worker (مثل `https://my-proxy.username.workers.dev`) وضعه في متغيرات بيئة السكرابر: `CF_WORKER_URL=الرابط`.
+
+> الطلبات تخرج من داخل شبكة Cloudflare نفسها (IP بسّمة نظيفة لا تُصنّف كبوت) — فعّال خصيصاً ضد المواقع خلف Cloudflare. قد لا يتجاوز الحماية الأشدّ (تحدي مُدار إجباري)؛ عندها FlareSolverr هو الحل الأقوى.
+
+بعد أيٍ من هذه: التوجيه الذكي يكتشف الإعداد ويستخدمه تلقائياً بالترتيب الصحيح.
 
 ### حدود معروفة (شفافية كاملة)
 
@@ -480,4 +505,4 @@ register_site(
 | محتوى الفصول (أول/وسط) | ✅ نظيف (2701/2330 حرفاً) | ✅ عند نجاح الجلب |
 | كتاب المستخدم 83526 | ✅ (توأمه) | ✅ «時停起手，邪神也得給我跪下！」 |
 
-**للإنتاج:** روابط `twkan.cc` تعمل مباشرة 100%. روابط `twkan.com` تعمل الآن (بروكسي جوجل + توأم `.cc`)، ولضمان أقصى استقرار أضف `FLARESOLVR_URL` أو `SCRAPERAPI_KEY` (القسم 11) — فيصبح كل طلب على `.com` مؤكداً.
+**للإنتاج:** روابط `twkan.cc` تعمل مباشرة 100% — والأهم أن السحب أصبح بإيقاع بشري (1.2–2.5 ثانية بين فصل وآخر، قابل للضبط عبر `TWKAN_DELAY_MIN/MAX`) بعد أن ثبت بالفحص أن السرعة الآلية + بصمة python هما ما يُشغّل تحديات Cloudflare بعد ~20 فصلاً. روابط `twkan.com` تعمل (بروكسي جوجل + توأم `.cc`)، ولضمان أقصى استقرار أضف `CF_WORKER_URL` (مجاني 100k/يوم) أو `FLARESOLVR_URL` أو `SCRAPERAPI_KEY` (القسم 11).

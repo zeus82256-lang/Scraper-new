@@ -39,6 +39,19 @@ UA_MOBILE = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML,
 FLARESOLVR_URL = os.environ.get('FLARESOLVR_URL', '').rstrip('/')
 SCRAPERAPI_KEY = os.environ.get('SCRAPERAPI_KEY', '')
 RESIDENTIAL_PROXY = os.environ.get('RESIDENTIAL_PROXY', '')
+# CF_WORKER_URL  : رابط Cloudflare Worker خاص بك (مجاني 100,000 طلب/يوم) — يمرر
+#                  الطلبات من داخل شبكة Cloudflare نفسها
+
+# 🪪 curl_cffi: انتحال بصمة TLS للمتصفح الحقيقي.
+# المشكلة المؤكدة بالفحص: بصمة python-requests مكشوفة جداً — Cloudflare يرجع
+# صفحات تحدي (challenge-platform) محتواها 200 حتى مع User-Agent متصفح،
+# بينما نفس الرابط عبر curl_cffi بانتحال كروم يرجع المحتوى الحقيقي.
+# إن لم تكن المكتبة مثبتة يُستمر بrequests العادي دون أي كسر.
+try:
+    from curl_cffi import requests as _cffi_requests
+    _CFFI_IMPERSONATE = os.environ.get('CFFI_IMPERSONATE', 'chrome')
+except Exception:
+    _cffi_requests = None
 
 
 def get_headers(referer=None, use_cookies=False, ua=None, lang='ar,en-US;q=0.7,en;q=0.3'):
@@ -222,12 +235,54 @@ def _scraperapi_get(url, referer=None, validate=None):
     return None
 
 
+def _direct_get(url, headers, timeout=20, proxies=None, encoding=None):
+    """الطلب المباشر بانتحال بصمة متصفح حقيقي (curl_cffi) إن توفر.
+    نحذف User-Agent اليدوي ليدع curl_cffi يضع وكيل المستخدم المطابق للبصمة
+    المنتحلة (كروم كامل: TLS + HTTP2 + ترويسات) — فلا تتناقض الهوية."""
+    if _cffi_requests is not None:
+        try:
+            h = {k: v for k, v in (headers or {}).items()
+                 if k.lower() != 'user-agent'}
+            r = _cffi_requests.get(url, headers=h, timeout=timeout,
+                                   allow_redirects=True,
+                                   impersonate=_CFFI_IMPERSONATE,
+                                   proxies=proxies)
+            if encoding:
+                try:
+                    r.encoding = encoding
+                except Exception:
+                    pass
+            return r
+        except Exception as e:
+            print(f"   curl_cffi failed {url[:70]}: {str(e)[:70]} — retrying plain requests")
+    return requests.get(url, headers=headers, timeout=timeout,
+                        allow_redirects=True, proxies=proxies)
+
+
+def _cf_worker_get(url, worker_url, validate=None):
+    """طلب عبر Cloudflare Worker خاص بالمستخدم — مجاني حتى 100,000 طلب/يوم.
+    الطلب يخرج من داخل شبكة Cloudflare نفسها (IP سمعة نظيفة لا تُقيَّم كبوت).
+    الـ worker المتوقع: يعيد جسم الصفحة الخام بحالة 200 (انظر README قسم 11).
+    اختياري بالكامل: يُفعّل فقط عند ضبط CF_WORKER_URL."""
+    try:
+        r = requests.get(f"{worker_url}?url={quote(url, safe='')}",
+                         headers=get_headers(), timeout=60)
+        if r.status_code == 200 and not _looks_blocked(200, r.text) \
+                and (validate is None or validate(r.text)):
+            print(f"   🛰️ via CF worker: {url[:70]}")
+            return SmartResponse(r.text, 200, route='cfworker')
+    except Exception as e:
+        print(f"   CF worker failed: {str(e)[:80]}")
+    return None
+
+
 def smart_get(url, sl='en', tl='es', referer=None, timeout=25,
               encoding=None, use_cookies=False, ua=None, lang=None, use_route_cache=True,
               validate=None):
     """
     طلب ذكي متعدد الطرق (مخصص للمواقع التي تحجب IP السيرفرات):
-      مباشر → بروكسي ترجمة جوجل → FlareSolverr (اختياري) → ScraperAPI (اختياري)
+      مباشر (انتحال بصمة متصفح) → Cloudflare Worker (اختياري) → بروكسي ترجمة
+      جوجل → FlareSolverr (اختياري) → ScraperAPI (اختياري)
     يعيد SmartResponse/Response أو None إذا فشلت كل الطرق.
 
     validate: دالة اختيارية (body -> bool) للتحقق أن المحتوى حقيقي وليس صفحة خداع
@@ -241,19 +296,19 @@ def smart_get(url, sl='en', tl='es', referer=None, timeout=25,
     flaresolverr = os.environ.get('FLARESOLVR_URL', '').rstrip('/')
     scraperapi_key = os.environ.get('SCRAPERAPI_KEY', '')
     residential = os.environ.get('RESIDENTIAL_PROXY', '')
+    cf_worker = os.environ.get('CF_WORKER_URL', '').rstrip('/')
 
     cached = _DOMAIN_ROUTE_CACHE.get(domain) if use_route_cache else None
     direct_status = None
     direct_body = None
 
-    # ---------- الطريقة 1: الطلب المباشر ----------
+    # ---------- الطريقة 1: الطلب المباشر (بصمة متصفح حقيقية) ----------
     if cached in (None, 'direct'):
         proxies = {'http': residential, 'https': residential} if residential else None
         try:
-            r = requests.get(url, headers=get_headers(referer=referer, use_cookies=use_cookies, ua=ua, lang=lang),
-                             timeout=timeout, allow_redirects=True, proxies=proxies)
-            if encoding:
-                r.encoding = encoding
+            r = _direct_get(url, get_headers(referer=referer, use_cookies=use_cookies,
+                                             ua=ua, lang=lang),
+                            timeout=timeout, proxies=proxies, encoding=encoding)
             if r.status_code == 200 and not _looks_blocked(200, r.text) \
                     and (validate is None or validate(r.text)):
                 if use_route_cache:
@@ -270,7 +325,18 @@ def smart_get(url, sl='en', tl='es', referer=None, timeout=25,
             _DOMAIN_ROUTE_CACHE.pop(domain, None)
             cached = None
 
-    # ---------- الطريقة 2: بروكسي ترجمة جوجل ----------
+    # ---------- الطريقة 2: Cloudflare Worker (اختياري — مجاني 100k/يوم) ----------
+    if cf_worker and cached in (None, 'cfworker'):
+        r = _cf_worker_get(url, cf_worker, validate=validate)
+        if r is not None:
+            if use_route_cache:
+                _DOMAIN_ROUTE_CACHE[domain] = 'cfworker'
+            return r
+        if cached == 'cfworker':
+            _DOMAIN_ROUTE_CACHE.pop(domain, None)
+            cached = None
+
+    # ---------- الطريقة 3: بروكسي ترجمة جوجل ----------
     if cached in (None, 'translate'):
         turl = translate_proxy_url(url, sl=sl, tl=tl)
         for attempt in range(4):
@@ -298,7 +364,7 @@ def smart_get(url, sl='en', tl='es', referer=None, timeout=25,
                 continue
             break
 
-    # ---------- الطريقة 3: FlareSolverr ----------
+    # ---------- الطريقة 4: FlareSolverr ----------
     if flaresolverr:
         r = _flaresolverr_get(url, validate=validate)
         if r is not None:
@@ -306,7 +372,7 @@ def smart_get(url, sl='en', tl='es', referer=None, timeout=25,
                 _DOMAIN_ROUTE_CACHE[domain] = 'flaresolverr'
             return r
 
-    # ---------- الطريقة 4: ScraperAPI ----------
+    # ---------- الطريقة 5: ScraperAPI ----------
     if scraperapi_key:
         r = _scraperapi_get(url, referer=referer, validate=validate)
         if r is not None:

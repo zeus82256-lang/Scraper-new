@@ -14,9 +14,11 @@
 8.  Novel543     - novel543.com          ✅ جديد (Cloudflare متقلب أحياناً)
 """
 
+import os
 import re
 import time
 import json
+import random
 import requests
 from urllib.parse import urljoin, urlparse
 
@@ -1788,8 +1790,10 @@ def worker_twkan(url, admin_email, metadata):
     """عامل مخصص: منطق generic_worker + ذكاء إضافي —
     إذا حجب خداع Cloudflare فهرس twkan.com، يبحث عن توأم الكتاب على twkan.cc
     (نفس قاعدة البيانات، مفتوح بدون حماية) ويسحب الفصول والمحتوى منه مباشرة.
-    مقاوم للأعطال: إعادة محاولة الإرسال، سجل صريح لكل فشل محتوى، توقف آمن
-    بدل التسريب الصامت للحزم — الفصول غير المرسلة يعيد السكرابر سحبها في الجولة القادمة."""
+    مقاوم للأعطال: إيقاع بشري بين الفصول (يمنع تشغيل تحديات Cloudflare)،
+    تهدئة متصاعدة عند التعثر، إعادة محاولة الإرسال، سجل صريح لكل فشل،
+    توقف آمن بدل التسريب الصامت للحزم — الفصول غير المرسلة يعيد السكرابر
+    سحبها في الجولة القادمة."""
     from core.backend import send_data_to_backend, check_existing_chapters
 
     BATCH_SIZE = 5
@@ -1853,6 +1857,16 @@ def worker_twkan(url, admin_email, metadata):
     batch = []
     consec_fail = 0
 
+    # ⏱️ إيقاع بشري: السرعة الآلية (5 فصول/ثانية) هي ما يشغّل تحديات
+    # Cloudflare بعد ~20 طلباً من IP مراكز البيانات (مؤكد بالفحص الحي:
+    # بصمة python مكشوفة تُقابل بصفحات challenge-platform 200 مزيفة).
+    # مهلة عشوائية بين الفصول تخفي الطبيعة الآلية للطلبات.
+    delay_min = float(os.environ.get('TWKAN_DELAY_MIN', '1.2') or 1.2)
+    delay_max = float(os.environ.get('TWKAN_DELAY_MAX', '2.5') or 2.5)
+    slow_left = 0  # فصول متبقية بالأداء البطيء بعد أي تعثر (استشفاء لطيف)
+    print(f"⏱️ twkan pacing: {delay_min}-{delay_max}s between chapters "
+          f"(tune via env: TWKAN_DELAY_MIN / TWKAN_DELAY_MAX)")
+
     def _flush():
         """إرسال الحزمة الحالية؛ عند فشل مستمر يتوقف العامل بأمان بدل مواصلة السحب بلا فائدة"""
         if not batch:
@@ -1868,7 +1882,12 @@ def worker_twkan(url, admin_email, metadata):
             return True
         return False
 
-    for chap in to_scrape:
+    for idx, chap in enumerate(to_scrape):
+        if idx:
+            mult = 2.5 if slow_left > 0 else 1.0
+            if slow_left > 0:
+                slow_left -= 1
+            time.sleep(random.uniform(delay_min, delay_max) * mult)
         print(f"Scraping {metadata.get('title', '?')}: Ch {chap['number']}...")
         try:
             content = scrape_chapter_twkan(chap['url'])
@@ -1885,6 +1904,9 @@ def worker_twkan(url, admin_email, metadata):
                 content = None
 
         if content:
+            if consec_fail >= 3:
+                print(f"   💚 recovered at Ch {chap['number']} after {consec_fail} "
+                      f"consecutive failures — keeping a slow pace for a while")
             stats['scraped'] += 1
             consec_fail = 0
             batch.append({'number': chap['number'], 'title': chap['title'],
@@ -1894,15 +1916,22 @@ def worker_twkan(url, admin_email, metadata):
         else:
             stats['failed'] += 1
             consec_fail += 1
+            slow_left = 10
             print(f"   ❌ Ch {chap['number']}: content failed "
                   f"(consecutive: {consec_fail}) — chapter skipped this run")
             if consec_fail >= 3:
-                print("   😴 cooling down 15s (possible rate-limit) ...")
-                time.sleep(15)
-            if consec_fail >= 10:
-                print(f"🛑 10 consecutive content failures — aborting. "
+                # تهدئة متصاعدة 20/40/80/160/160... — نوافذ تحديد المعدل في
+                # Cloudflare عادةً دقائق، فالصبر الطويل هنا ينقذ الجولة
+                # بدل قطعها مبكراً بينما الاستئناف سيكرر نفس العائق لاحقاً
+                cd = min(20 * (2 ** (consec_fail - 3)), 160)
+                print(f"   😴 cooling down {cd}s (possible rate-limit) ...")
+                time.sleep(cd)
+            if consec_fail >= 8:
+                print(f"🛑 8 consecutive content failures — aborting. "
                       f"scraped={stats['scraped']}, failed={stats['failed']}. "
-                      f"Next run resumes the gaps.")
+                      f"Next run resumes the gaps. "
+                      f"(للحجب العنيد: FLARESOLVR_URL أو SCRAPERAPI_KEY أو CF_WORKER_URL)")
+                _flush()  # لا نرمي الفصول الناجحة المتراكمة — نرسلها قبل التوقف
                 return
 
     _flush()
@@ -1922,7 +1951,8 @@ register_site(
     status='active',
     notes='نطاقان لقاعدة بيانات واحدة بقالبين: twkan.cc (جديد، يعمل مباشرة — موصى به) '
           'وtwkan.com (جيتشي قديم، خلف Cloudflare صارم بتحدي مُدار وصفحات خداع 200 مزيفة) '
-          'يُتعامل معه عبر smart_get + كاشف الخداع، ومن IP مراكز البيانات يحتاج '
-          'FLARESOLVR_URL أو SCRAPERAPI_KEY. الفهرس الكامل على .com عبر '
-          '/ajax_novels/chapterlist/{id}.html.'
+          'يُتعامل معه عبر smart_get (انتحال بصمة curl_cffi + كاشف الخداع)، ومن IP مراكز '
+          'البيانات يحتاج FLARESOLVR_URL أو SCRAPERAPI_KEY أو CF_WORKER_URL. الفهرس الكامل '
+          'على .com عبر /ajax_novels/chapterlist/{id}.html. السحب بإيقاع بشري '
+          '(TWKAN_DELAY_MIN/MAX) + تهدئة متصاعدة لمقاومة تحديد المعدل.'
 )
