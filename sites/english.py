@@ -979,7 +979,8 @@ def fetch_chapter_list_scribblehub(url):
     لذا نجرب بالترتيب: POST مباشر بانتحال بصمة كروم ← GET عبر smart_get
     (بروكسي جوجل/worker إن ضُبط) ← POST عبر smart_get (FlareSolverr/ScraperAPI
     مع دوران كل المفاتيح). عند الفشل: رسالة صريحة في كونسول التطبيق."""
-    from core.utils import _direct_post, push_log
+    from core.utils import _direct_post
+    from core.backend import push_log
     chapters = []
     try:
         # استخراج معرف الرواية من الرابط /series/{id}/{slug}/

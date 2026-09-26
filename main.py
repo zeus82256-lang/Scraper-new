@@ -149,8 +149,9 @@ def trigger_scrape():
                 'siteStatus': site['status'],
                 'notes': site.get('notes', ''),
                 'reason': ('الموقع يحجب IP السيرفر الحالي. المواقع المسجلة active تعمل عبر '
-                           'التوجيه الذكي تلقائياً — إن فشل هذا الموقع جرّب ضبط متغيرات البيئة '
-                           'FLARESOLVR_URL أو SCRAPERAPI_KEY. تفاصيل كل موقع في GET /sites'),
+                           'التوجيه الذكي تلقائياً — إن فشل هذا الموقع أضف مفاتيح ScraperAPI '
+                           'من واجهة التطبيق أو ضبط متغير البيئة SCRAPERAPI_KEYS '
+                           '(مفاتيح مفصولة بفواصل) أو FLARESOLVR_URL. تفاصيل كل موقع في GET /sites'),
             }), 400
 
         # تشغيل العامل في خيط منفصل
