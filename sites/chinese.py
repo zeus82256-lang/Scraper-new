@@ -7,7 +7,7 @@
 1.  Quanben      - quanben.io            ⚠️ يعمل (محجوب عن IP السيرفرات فقط)
 2.  52shuku      - 52shuku.net           ✅ يعمل (تم إعادة كتابته للتصميم الجديد)
 3.  ErCiYuan     - erciyan.com           ⚠️ يعمل (WAF كابتشا من IP السيرفرات فقط)
-4.  69shu        - 69shu.xyz / 69shuba.com   ✅ جديد (Cloudflare أحياناً)
+4.  69shu        - 69shuba.com / 69shu.xyz   ✅ v2.4 (curl_cffi مجاناً + قالب جديد /book/{id}/)
 5.  ixdzs8       - ixdzs8.com            ✅ جديد ويعمل بالكامل (爱下电子书)
 6.  Linovel      - linovel.net           ✅ جديد ويعمل بالكامل
 7.  Linovelib TW - tw.linovelib.com      ✅ جديد ويعمل بالكامل (繁體)
@@ -26,7 +26,7 @@ from core.registry import register_site
 from core.utils import (
     http_get, smart_get, parse_html, get_headers, get_base_url, fix_image_url,
     parse_relative_date, extract_chapter_number, clean_text, get_meta,
-    UA_FIREFOX,
+    UA_FIREFOX, SmartResponse,
     generic_worker,
 )
 
@@ -577,29 +577,78 @@ def worker_erciyuan(url, admin_email, metadata):
 # 69shu.xyz / 69shu.com / 69shuba.com / 69shuba.cx
 # الموقع يستخدم ترميز GBK!
 
-SHU69_DOMAINS = ['www.69shu.xyz', 'www.69shu.com', 'www.69shuba.com', '69shuba.com', '69shu.xyz']
+SHU69_DOMAINS = ['www.69shuba.com', 'www.69shu.com', 'www.69shu.xyz', '69shuba.com', '69shu.xyz']
+# ⚠️ 2026-09: www.69shu.xyz يحجب حتى بصمة curl_cffi — 69shuba.com يعمل مباشرة
+# عبر curl_cffi (بانتحال كروم) — لذلك قُلّب الترتيب ليجرب المفتوح أولاً
 
 
 def _shu69_base(url=''):
-    """تحديد الدومين الأساسي: من الرابط نفسه أو أول دومين يعمل"""
+    """تحديد الدومين الأساسي: من الرابط نفسه أو أول دومين يعمل (عبر التوجيه الذكي
+    ليستفيد من بصمة curl_cffi والمسارات البديلة عند الحجب)"""
     if url:
         parsed = urlparse(url)
         if parsed.netloc:
             return f"{parsed.scheme}://{parsed.netloc}"
     for domain in SHU69_DOMAINS:
         base = f"https://{domain}"
-        r = http_get(base, ua=UA_FIREFOX, lang=ZH_HEADERS_LANG, timeout=12)
-        if r is not None and r.status_code == 200 and 'just a moment' not in r.text[:3000].lower():
+        r = smart_get(base, encoding='gbk', timeout=12)
+        if r is not None and r.status_code == 200:
             return base
-    return 'https://www.69shu.xyz'
+    return 'https://www.69shuba.com'
+
+
+def _shu69_cjk_score(s):
+    """درجة سلامة النص الصيني: نمط العناوين 第N章 مرجّح + أطوال الجُمل الصينية"""
+    if not s:
+        return 0
+    return (len(re.findall(r'第\d+[章回节节]', s)) * 10
+            + len(re.findall(r'[\u4e00-\u9fff]{3,}', s[:6000])))
+
+
+def _decode_best(raw):
+    """اختيار أفضل ترميز (utf-8/gbk) بدرجة السلامة — الموقع GBK لكن
+    ScraperAPI وبروكسي جوجل يعيدان نسخة UTF-8"""
+    cands = []
+    for enc in ('utf-8', 'gbk'):
+        try:
+            cands.append(raw.decode(enc, errors='ignore'))
+        except Exception:
+            pass
+    return max(cands, key=_shu69_cjk_score) if cands else ''
 
 
 def _shu69_get(url, timeout=15):
-    """طلب مع ترميز GBK الصحيح"""
-    r = http_get(url, ua=UA_FIREFOX, lang=ZH_HEADERS_LANG, timeout=timeout)
-    if r is not None:
-        r.encoding = 'gbk'
+    """طلب عبر التوجيه الذكي (مباشر curl_cffi → CF Worker → بروكسي جوجل →
+    ScraperAPI) مع معالجة ترميز ذكية: الموقع GBK لكن المسارات الوسيطة تعيد
+    UTF-8 أو فكّاً خاطئاً — نقيس سلامة النص ونسترجع البايتات الأصلية عند التشوه"""
+    r = smart_get(url, sl='zh-CN', tl='en', encoding='gbk',
+                  lang=ZH_HEADERS_LANG, timeout=timeout)
+    if r is None:
+        return None
+    t = r.text or ''
+    if _shu69_cjk_score(t[:6000]) >= 3:
+        return r  # النص سليم كما هو
+    # النص مشوّه/فارغ — استرجاع البايتات الأصلية واختيار أفضل ترميز
+    raw = None
+    try:
+        rt = t.encode('latin-1', errors='ignore')  # استرجاع بايتات فُكّت latin-1
+        if rt and _shu69_cjk_score(_decode_best(rt)[:6000]) > _shu69_cjk_score(t[:6000]):
+            raw = rt
+    except Exception:
+        pass
+    if not raw:
+        raw = getattr(r, 'content', b'') or b''
+    fixed = _decode_best(raw)
+    if fixed and _shu69_cjk_score(fixed[:6000]) > _shu69_cjk_score(t[:6000]):
+        return SmartResponse(fixed, getattr(r, 'status_code', 200),
+                             route=getattr(r, 'route', 'direct'))
     return r
+
+
+def _shu69_book_id(url):
+    """معرف الكتاب من أي صيغة رابط (الجديد /book/{id}.htm أو القديم /txt/{id})"""
+    m = re.search(r'/book/(\d+)', url) or re.search(r'/txt/(\d+)', url)
+    return m.group(1) if m else None
 
 
 def fetch_metadata_69shu(url):
@@ -610,35 +659,50 @@ def fetch_metadata_69shu(url):
         soup = parse_html(r.text)
 
         title_tag = soup.find('h1')
-        title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
+        title = title_tag.get_text(strip=True) if title_tag else ""
+        if not title:
+            title = get_meta(soup, prop='og:title') or "Unknown Title"
 
         cover = ""
-        cover_img = soup.select_one('div.cover > img, .book-img img')
+        cover_img = soup.select_one('img[src*="files/article/image"], div.cover > img, .book-img img')
         if cover_img:
             cover = cover_img.get('src') or cover_img.get('data-src') or ""
+        if not cover:
+            cover = get_meta(soup, prop='og:image') or ""
         cover = fix_image_url(cover, base_url=get_base_url(url))
 
-        summary_div = soup.select_one('#bookIntro, .book-intro')
+        summary_div = soup.select_one('div.navtxt, #bookIntro, .book-intro')
         description = summary_div.get_text("\n", strip=True) if summary_div else ""
         description = re.sub(r'^简介[:：]?\s*', '', description)
 
+        # المؤلف: القالب الجديد author.php، القديم bookinfo
         author = ""
+        a_author = soup.select_one('a[href*="author.php"]')
+        if a_author:
+            author = a_author.get('title') or a_author.get_text(strip=True)
+        if not author:
+            info_p = soup.select_one('div.caption-bookinfo p, .book-info')
+            if info_p:
+                a_tag = info_p.find('a')
+                if a_tag:
+                    author = a_tag.get('title') or a_tag.get_text(strip=True)
+
+        # الحالة: القالب الجديد og:novel:status، القديم فحص نصي
         status = "مستمرة"
-        info_p = soup.select_one('div.caption-bookinfo p, .book-info')
-        if info_p:
-            a_tag = info_p.find('a')
-            if a_tag:
-                author = a_tag.get('title') or a_tag.get_text(strip=True)
-            if '连载' not in info_p.get_text():
+        og_status = (get_meta(soup, prop='og:novel:status') or '')
+        if '完' in og_status:
+            status = "مكتملة"
+        elif og_status or True:
+            info_p = soup.select_one('div.caption-bookinfo p, .book-info')
+            if info_p and ('连载' not in info_p.get_text()):
                 status = "مكتملة"
 
-        # معرف الكتاب لقائمة الفصول
-        book_id_match = re.search(r'/txt/(\d+)', url)
+        category = get_meta(soup, prop='og:novel:category') or "عام"
 
         return {
             'title': title, 'description': description, 'cover': cover,
-            'author': author, 'status': status, 'category': "عام", 'tags': [],
-            'book_id': book_id_match.group(1) if book_id_match else None,
+            'author': author, 'status': status, 'category': category, 'tags': [],
+            'book_id': _shu69_book_id(url),
             'sourceUrl': url,
             'lastUpdate': None
         }
@@ -648,58 +712,76 @@ def fetch_metadata_69shu(url):
 
 
 def fetch_chapter_list_69shu(url):
-    """قائمة الفصول: من صفحة الفهرس الكامل (مع ترقيم صفحات داخلي)"""
+    """قائمة الفصول — القالب الجديد 2026: الكتالوج الكامل في /book/{id}/
+    (li data-num > a مطلقة /txt/{id}/{cid}) — القالب القديم /txt/{id}/all.html احتياط"""
     chapters = []
     try:
         base = get_base_url(url)
+        bid = _shu69_book_id(url)
 
-        # 1. إيجاد رابط الفهرس الكامل (dd.all > a)
-        r = _shu69_get(url)
-        if r is None or r.status_code != 200:
-            return []
-        soup = parse_html(r.text)
+        # 1) القالب الجديد: /book/{id}/ كتالوج كامل بصفحة واحدة
+        if bid:
+            catalog_url = f"{base}/book/{bid}/"
+            rc = _shu69_get(catalog_url, timeout=25)
+            if rc is not None and rc.status_code == 200:
+                csoup = parse_html(rc.text)
+                for li in csoup.select('li[data-num]'):
+                    a = li.find('a', href=True)
+                    if not a or '/txt/' not in a['href']:
+                        continue
+                    full_link = a['href'] if a['href'].startswith('http') else urljoin(base, a['href'])
+                    title = a.get_text(strip=True)
+                    try:
+                        number = int(li.get('data-num'))
+                    except (TypeError, ValueError):
+                        number = extract_chapter_number(title, full_link)
+                    if number > 0 and not any(c['number'] == number for c in chapters):
+                        chapters.append({'number': number, 'url': full_link, 'title': title})
 
-        all_link = soup.select_one('dd.all > a')
-        if not all_link or not all_link.get('href'):
-            # جرّب مباشرة نمط /txt/{id}/all.html أو /txt/{id}.html
-            m = re.search(r'/txt/(\d+)', url)
-            if m:
-                catalog_url = f"{base}/txt/{m.group(1)}/all.html"
-            else:
+        # 2) القالب القديم: dd.all > a → /txt/{id}/all.html (مع ترقيم صفحات)
+        if not chapters:
+            r = _shu69_get(url)
+            if r is None or r.status_code != 200:
                 return []
-        else:
-            catalog_url = urljoin(base, all_link['href'])
+            soup = parse_html(r.text)
 
-        # 2. التنقل بين صفحات الفهرس
-        current_url = catalog_url
-        visited = set()
-        while current_url and current_url not in visited:
-            visited.add(current_url)
-            rc = _shu69_get(current_url)
-            if rc is None or rc.status_code != 200:
-                break
-            csoup = parse_html(rc.text)
+            all_link = soup.select_one('dd.all > a')
+            if not all_link or not all_link.get('href'):
+                if bid:
+                    catalog_url = f"{base}/txt/{bid}/all.html"
+                else:
+                    return []
+            else:
+                catalog_url = urljoin(base, all_link['href'])
 
-            for dd in csoup.select('dl.panel-chapterlist dd'):
-                a = dd.find('a')
-                if not a or not a.get('href'):
-                    continue
-                href = a['href']
-                full_link = href if href.startswith('http') else urljoin(base, href)
-                title = a.get_text(strip=True)
-                number = extract_chapter_number(title, full_link)
-                if number > 0 and not any(c['number'] == number for c in chapters):
-                    chapters.append({'number': number, 'url': full_link, 'title': title})
-
-            # رابط الصفحة التالية (下一页)
-            next_link = None
-            for a in csoup.select('div.listpage a'):
-                if '下一页' in a.get_text() and a.get('href') and 'javascript' not in a['href']:
-                    next_link = urljoin(base, a['href'])
+            current_url = catalog_url
+            visited = set()
+            while current_url and current_url not in visited:
+                visited.add(current_url)
+                rc = _shu69_get(current_url)
+                if rc is None or rc.status_code != 200:
                     break
-            current_url = next_link
-            if current_url:
-                time.sleep(0.5)
+                csoup = parse_html(rc.text)
+
+                for dd in csoup.select('dl.panel-chapterlist dd'):
+                    a = dd.find('a')
+                    if not a or not a.get('href'):
+                        continue
+                    href = a['href']
+                    full_link = href if href.startswith('http') else urljoin(base, href)
+                    title = a.get_text(strip=True)
+                    number = extract_chapter_number(title, full_link)
+                    if number > 0 and not any(c['number'] == number for c in chapters):
+                        chapters.append({'number': number, 'url': full_link, 'title': title})
+
+                next_link = None
+                for a in csoup.select('div.listpage a'):
+                    if '下一页' in a.get_text() and a.get('href') and 'javascript' not in a['href']:
+                        next_link = urljoin(base, a['href'])
+                        break
+                current_url = next_link
+                if current_url:
+                    time.sleep(0.5)
 
         chapters.sort(key=lambda x: x['number'])
         print(f"✅ Total 69shu chapters found: {len(chapters)}")

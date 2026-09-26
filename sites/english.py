@@ -9,7 +9,7 @@
 3.  FanMTL           - fanmtl.com                    ✅ (نفس منصة NovelMTL + قالب قديم)
 4.  WuxiaWorld.Site  - wuxiaworld.site               ✅ يعمل (قالب Madara)
 5.  WuxiaBox/Spot    - wuxiabox.com / wuxiaspot.com  ⚠️ يعمل (محجوب عن IP السيرفرات فقط)
-6.  FreeWebNovel     - freewebnovel.com              ⚠️ يعمل (محجوب عن IP السيرفرات فقط)
+6.  FreeWebNovel     - freewebnovel.com              ✅ عبر SCRAPERAPI_KEY (v2.4: قالب جديد + ترقيم ?page=N)
 7.  Royal Road       - royalroad.com                 ⚠️ يعمل (محجوب عن IP السيرفرات فقط)
 8.  Scribble Hub     - scribblehub.com               ⚠️ يعمل (محجوب عن IP السيرفرات فقط)
 9.  NovelBin         - novelbin.net                  ⚠️ يعمل (حماية JS تُحل تلقائياً)
@@ -701,30 +701,51 @@ def fetch_metadata_freewebnovel(url):
 
 
 def fetch_chapter_list_freewebnovel(url):
+    """قائمة الفصول مع الترقيم الجديد للموقع:
+    الصفحة الأولى تعرض دفعة فقط (30-40) والباقي عبر ?page=N
+    (عدد الصفحات من خيارات #indexselect)"""
     chapters = []
     try:
-        response = smart_get(url, timeout=25)
-        if response is None or response.status_code != 200:
-            return []
-        soup = parse_html(response)
+        base_list_url = url.split('?')[0]
+        seen = set()
+        page = 1
+        while page <= 400:  # شبكة أمان ضد الحلقات اللانهائية
+            list_url = base_list_url if page == 1 else f"{base_list_url}?page={page}"
+            response = smart_get(list_url, timeout=25)
+            if response is None or response.status_code != 200:
+                break
+            soup = parse_html(response)
 
-        items = soup.select('ul#idData li a')
-        for a in items:
-            href = a.get('href')
-            full_link = urljoin('https://freewebnovel.com', href)
-            title = a.get('title') or a.get_text(strip=True)
+            new = 0
+            items = soup.select('ul#idData li a')
+            for a in items:
+                href = a.get('href')
+                if not href:
+                    continue
+                full_link = urljoin('https://freewebnovel.com', href)
+                title = a.get('title') or a.get_text(strip=True)
 
-            match = re.search(r'Chapter\s+(\d+)', title, re.IGNORECASE)
-            if match:
-                num = int(match.group(1))
-                chapters.append({'number': num, 'url': full_link, 'title': title})
+                match = re.search(r'Chapter\s+(\d+)', title, re.IGNORECASE)
+                if match:
+                    num = int(match.group(1))
+                    if num in seen:
+                        continue
+                    seen.add(num)
+                    chapters.append({'number': num, 'url': full_link, 'title': title})
+                    new += 1
 
-        chapters = list({c['number']: c for c in chapters}.values())
+            # لا فصول جديدة أو لا صفحات إضافية = انتهى الفهرس
+            page_options = soup.select('#indexselect option')
+            if new == 0 or len(page_options) <= page:
+                break
+            page += 1
+            time.sleep(0.5)
+
         chapters.sort(key=lambda x: x['number'])
         return chapters
     except Exception as e:
         print(f"Error Freewebnovel List: {e}")
-        return []
+        return chapters
 
 
 def scrape_chapter_freewebnovel(url):
@@ -738,8 +759,16 @@ def scrape_chapter_freewebnovel(url):
         if not content_div:
             return None
 
-        for bad in content_div.find_all(['script', 'style', 'subtxt', 'div', 'center']):
+        for bad in content_div.find_all(['script', 'style', 'subtxt', 'center']):
             bad.decompose()
+        # 🆕 الموقع الجديد يلفّ النص داخل divs فرعية — سابقاً كان حذف كل div
+        # يمسح النص كله (0 حرف)؛ الآن: div يحمل نصاً يُفكّ ويُبقى محتواه،
+        # وdiv فارغ (إعلان/فاصل) يُحذف
+        for d in content_div.find_all('div'):
+            if d.get_text(strip=True):
+                d.unwrap()
+            else:
+                d.decompose()
 
         text = content_div.get_text(separator="\n\n", strip=True)
         text = re.sub(r'Find.*novels.*at.*freewebnovel.*', '', text, flags=re.IGNORECASE)
