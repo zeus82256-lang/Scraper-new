@@ -194,14 +194,20 @@ def _looks_blocked(status_code, body):
     return False
 
 
-def _flaresolverr_get(url, validate=None):
+def _flaresolverr_get(url, validate=None, post_data=None):
     """طلب عبر FlareSolverr (يحل تحديات Cloudflare بمتصفح حقيقي) — اختياري"""
     if not FLARESOLVR_URL:
         return None
     try:
+        payload = {'cmd': 'request.get', 'url': url, 'maxTimeout': 60000}
+        if post_data:
+            payload['cmd'] = 'request.post'
+            payload['postBody'] = '&'.join(
+                f"{quote(str(k), safe='')}={quote(str(v), safe='')}"
+                for k, v in post_data.items())
         r = requests.post(
             f"{FLARESOLVR_URL}/v1",
-            json={'cmd': 'request.get', 'url': url, 'maxTimeout': 60000},
+            json=payload,
             timeout=75,
         )
         if r.status_code == 200:
@@ -218,20 +224,203 @@ def _flaresolverr_get(url, validate=None):
     return None
 
 
-def _scraperapi_get(url, referer=None, validate=None):
-    """طلب عبر ScraperAPI (بروكسي سكني) — اختياري بمفتاح مجاني"""
-    if not SCRAPERAPI_KEY:
-        return None
+# ==========================================
+# 🛰️ محرك ScraperAPI متعدد المفاتيح (Multi-Key Rotation)
+# ==========================================
+# المفاتيح تُجمع من 3 مصادر بالترتيب (مع إزالة التكرار):
+#   1) متغير البيئة SCRAPERAPI_KEYS : عدة مفاتيح مفصولة بفواصل أو أسطر
+#   2) متغير البيئة SCRAPERAPI_KEY  : مفتاح واحد (توافق مع الإعداد القديم)
+#   3) مفاتيح مرسلة وقت التشغيل عبر POST /scraperapi/keys (من واجهة التطبيق)
+#      وعند فراغ كل المصادر يُجرّب سحبها من خادم التطبيق تلقائياً.
+#
+# إدارة الحالة لكل مفتاح:
+#   ok        → يعمل (يُستخدم بالتناوب round-robin)
+#   exhausted → استُهلك رصيده الشهري (403 exhausted) — يُتخطى حتى إعادة الإرسال
+#   invalid   → مفتاح غير صالح (401) — يُتخطى حتى إعادة الإرسال
+import threading as _threading
+
+_SCRAPERAPI_LOCK = _threading.Lock()
+_SCRAPERAPI_RUNTIME = {'keys': [], 'status': {}, 'cursor': 0, 'last_app_pull': 0.0}
+
+
+def _mask_key(key):
+    """إخفاء معظم أجزاء المفتاح للسجلات: 6ac34ae7…99a92"""
+    k = str(key or '')
+    if len(k) <= 12:
+        return k[:4] + '…'
+    return f"{k[:8]}…{k[-5:]}"
+
+
+def _parse_keys_text(text):
+    """تفكيك نص يحوي مفاتيح مفصولة بفواصل و/أو أسطر جديد إلى قائمة نظيفة"""
+    if not text:
+        return []
+    raw = str(text).replace('\r', '\n').replace(',', '\n').split('\n')
+    keys, seen = [], set()
+    for part in raw:
+        k = part.strip().strip('"').strip("'")
+        # مفاتيح ScraperAPI سداسية عشرية بطول ~32؛ نسمح بمجال أوسع مع أي نطاق
+        if len(k) >= 15 and len(k) <= 80 and re.fullmatch(r'[A-Za-z0-9_\-]+', k) and k.lower() not in seen:
+            seen.add(k.lower())
+            keys.append(k)
+    return keys
+
+
+def set_scraperapi_keys(keys):
+    """ضبط مفاتيح وقت التشغيل (من واجهة التطبيق) — يعيد ضبط حالات الفشل"""
+    if isinstance(keys, str):
+        keys = _parse_keys_text(keys)
+    clean = _parse_keys_text('\n'.join(str(k) for k in (keys or [])))
+    with _SCRAPERAPI_LOCK:
+        _SCRAPERAPI_RUNTIME['keys'] = clean
+        _SCRAPERAPI_RUNTIME['status'] = {k: 'ok' for k in clean}
+        _SCRAPERAPI_RUNTIME['cursor'] = 0
+    print(f"🛰️ ScraperAPI keys updated: {len(clean)} key(s) active")
+    return clean
+
+
+def get_all_scraperapi_keys():
+    """كل المفاتيح المتاحة: البيئة + وقت التشغيل (بدون تكرار)"""
+    env_keys = _parse_keys_text(
+        (os.environ.get('SCRAPERAPI_KEYS', '') or '') + '\n' +
+        (os.environ.get('SCRAPERAPI_KEY', '') or '')
+    )
+    with _SCRAPERAPI_LOCK:
+        runtime_keys = list(_SCRAPERAPI_RUNTIME['keys'])
+    merged, seen = [], set()
+    for k in env_keys + runtime_keys:
+        if k.lower() not in seen:
+            seen.add(k.lower())
+            merged.append(k)
+    return merged
+
+
+def _pull_keys_from_app():
+    """سحب المفاتيح من خادم التطبيق (مصدرها واجهة المفاتيح) عند الفراغ —
+    مرة كل 10 دقائق كحد أقصى حتى لا نثقل الخادم"""
+    import time as _t
+    with _SCRAPERAPI_LOCK:
+        if _t.time() - _SCRAPERAPI_RUNTIME['last_app_pull'] < 600:
+            return
+        _SCRAPERAPI_RUNTIME['last_app_pull'] = _t.time()
     try:
-        params = {'api_key': SCRAPERAPI_KEY, 'url': url, 'country_code': 'us'}
-        r = requests.get('https://api.scraperapi.com/', params=params,
-                         headers=get_headers(referer=referer), timeout=70)
-        if r.status_code == 200 and not _looks_blocked(200, r.text) \
-                and (validate is None or validate(r.text)):
-            print(f"   🛰️ ScraperAPI: success for {url[:70]}")
-            return SmartResponse(r.text, 200, route='scraperapi')
+        from .config import API_SECRET, NODE_BACKEND_URL
+        r = requests.get(f"{NODE_BACKEND_URL}/api/admin/scraper-keys",
+                         headers={'x-api-secret': API_SECRET}, timeout=20)
+        if r.status_code == 200:
+            keys = r.json().get('keys') or []
+            if keys:
+                with _SCRAPERAPI_LOCK:
+                    existing = set(k.lower() for k in _SCRAPERAPI_RUNTIME['keys'])
+                    added = [k for k in keys if str(k).lower() not in existing]
+                    _SCRAPERAPI_RUNTIME['keys'].extend(added)
+                    for k in added:
+                        _SCRAPERAPI_RUNTIME['status'][k] = 'ok'
+                if added:
+                    print(f"🛰️ Pulled {len(added)} ScraperAPI key(s) from app server")
     except Exception as e:
-        print(f"   ScraperAPI failed: {str(e)[:80]}")
+        print(f"   ScraperAPI app-pull failed: {str(e)[:70]}")
+
+
+def get_scraperapi_status():
+    """ملخص حالات المفاتيح (مخفاة) للعرض في الواجهة والتقارير"""
+    keys = get_all_scraperapi_keys()
+    with _SCRAPERAPI_LOCK:
+        status = dict(_SCRAPERAPI_RUNTIME['status'])
+    out = []
+    for k in keys:
+        st = status.get(k, 'ok')  # مفاتيح البيئة تعتبر ok افتراضياً
+        out.append({'key': _mask_key(k), 'status': st})
+    ok = sum(1 for s in out if s['status'] == 'ok')
+    return {'total': len(out), 'ok': ok, 'keys': out}
+
+
+def _scraperapi_request(key, url, referer=None, post_data=None):
+    """طلب واحد عبر ScraperAPI بمفتاح محدد — يعيد (response|None, event)
+    event: ok | exhausted | invalid | protected | error"""
+    try:
+        headers = get_headers(referer=referer)
+        if post_data:
+            # تمرير POST عبر ScraperAPI: يُعاد إرسال الجسم للهدف كما هو
+            headers['Content-Type'] = 'application/x-www-form-urlencoded'
+            r = requests.post('https://api.scraperapi.com/',
+                              params={'api_key': key, 'url': url, 'country_code': 'us'},
+                              data=post_data, headers=headers, timeout=70)
+        else:
+            r = requests.get('https://api.scraperapi.com/',
+                             params={'api_key': key, 'url': url, 'country_code': 'us'},
+                             headers=headers, timeout=70)
+    except Exception as e:
+        print(f"   ScraperAPI[{_mask_key(key)}] error: {str(e)[:80]}")
+        return None, 'error'
+
+    body = r.text or ''
+    low = body[:300].lower()
+    if r.status_code == 403 and 'exhausted' in low:
+        return None, 'exhausted'
+    if r.status_code in (401, 403) and ('invalid' in low or 'unauthorized' in low):
+        return None, 'invalid'
+    if r.status_code in (403, 429) and 'rate' in low:
+        return None, 'rate'
+    if r.status_code == 500 and ('request failed' in low or 'protected' in low):
+        # ScraperAPI يعيد المحاولة داخلياً؛ 500 يعني فشل مؤقت (موقع محمي جداً)
+        return None, 'protected'
+    if r.status_code == 200 and not _looks_blocked(200, body):
+        return r, 'ok'
+    return None, 'blocked'
+
+
+def _scraperapi_get(url, referer=None, validate=None, post_data=None):
+    """طلب عبر ScraperAPI ببروكسي سكني — يدور على كل المفاتيح المتاحة.
+    يبدأ من مفتاح مختلف كل مرة (round-robin) لتوزيع الاستهلاك بالتساوي،
+    ويتخطى تلقائياً المفاتيح المستهلكة/غير الصالحة."""
+    keys = get_all_scraperapi_keys()
+    if not keys:
+        _pull_keys_from_app()
+        keys = get_all_scraperapi_keys()
+    if not keys:
+        return None
+
+    with _SCRAPERAPI_LOCK:
+        cursor = _SCRAPERAPI_RUNTIME['cursor']
+        _SCRAPERAPI_RUNTIME['cursor'] = (cursor + 1) % max(len(keys), 1)
+        status = _SCRAPERAPI_RUNTIME['status']
+    ordered = keys[cursor:] + keys[:cursor]
+
+    last_event = 'error'
+    for key in ordered:
+        st = status.get(key, 'ok')
+        if st in ('exhausted', 'invalid'):
+            continue
+
+        # محاولتان: بعض الفشل مؤقت (protected) ويعمل في المحاولة التالية
+        for attempt in range(2):
+            r, event = _scraperapi_request(key, url, referer=referer, post_data=post_data if attempt == 0 else None)
+            last_event = event
+            if event == 'ok' and r is not None:
+                if validate is None or validate(r.text):
+                    print(f"   🛰️ ScraperAPI[{_mask_key(key)}]: success for {url[:70]}")
+                    return SmartResponse(r.text, 200, route='scraperapi')
+                event = 'decoy'
+            if event == 'exhausted':
+                with _SCRAPERAPI_LOCK:
+                    _SCRAPERAPI_RUNTIME['status'][key] = 'exhausted'
+                print(f"   ⛔ ScraperAPI[{_mask_key(key)}] exhausted — rotating to next key")
+                break
+            if event == 'invalid':
+                with _SCRAPERAPI_LOCK:
+                    _SCRAPERAPI_RUNTIME['status'][key] = 'invalid'
+                print(f"   ⛔ ScraperAPI[{_mask_key(key)}] invalid — removing from rotation")
+                break
+            if event == 'decoy':
+                break
+            if event in ('protected', 'error', 'rate', 'blocked'):
+                time.sleep(2)
+
+    if all(status.get(k, 'ok') in ('exhausted', 'invalid') for k in keys):
+        print("⛔ ScraperAPI: ALL keys exhausted/invalid — add new keys from the app UI "
+              "(SCRAPERAPI_KEYS=key1,key2,...) or wait for monthly reset")
+    _ = last_event
     return None
 
 
@@ -259,6 +448,23 @@ def _direct_get(url, headers, timeout=20, proxies=None, encoding=None):
                         allow_redirects=True, proxies=proxies)
 
 
+def _direct_post(url, data, headers, timeout=20, proxies=None):
+    """طلب POST مباشر بانتحال بصمة متصفح حقيقي (curl_cffi) إن توفر —
+    ضروري لنقاط admin-ajax خلف Cloudflare حيث تكشف بصمة python الهوية"""
+    if _cffi_requests is not None:
+        try:
+            h = {k: v for k, v in (headers or {}).items()
+                 if k.lower() != 'user-agent'}
+            return _cffi_requests.post(url, data=data, headers=h, timeout=timeout,
+                                       allow_redirects=True,
+                                       impersonate=_CFFI_IMPERSONATE,
+                                       proxies=proxies)
+        except Exception as e:
+            print(f"   curl_cffi POST failed {url[:70]}: {str(e)[:70]} — retrying plain requests")
+    return requests.post(url, data=data, headers=headers, timeout=timeout,
+                         allow_redirects=True, proxies=proxies)
+
+
 def _cf_worker_get(url, worker_url, validate=None):
     """طلب عبر Cloudflare Worker خاص بالمستخدم — مجاني حتى 100,000 طلب/يوم.
     الطلب يخرج من داخل شبكة Cloudflare نفسها (IP سمعة نظيفة لا تُقيَّم كبوت).
@@ -278,23 +484,26 @@ def _cf_worker_get(url, worker_url, validate=None):
 
 def smart_get(url, sl='en', tl='es', referer=None, timeout=25,
               encoding=None, use_cookies=False, ua=None, lang=None, use_route_cache=True,
-              validate=None):
+              validate=None, post_data=None):
     """
     طلب ذكي متعدد الطرق (مخصص للمواقع التي تحجب IP السيرفرات):
       مباشر (انتحال بصمة متصفح) → Cloudflare Worker (اختياري) → بروكسي ترجمة
-      جوجل → FlareSolverr (اختياري) → ScraperAPI (اختياري)
+      جوجل → FlareSolverr (اختياري) → ScraperAPI (اختياري — دوران على كل المفاتيح)
     يعيد SmartResponse/Response أو None إذا فشلت كل الطرق.
 
     validate: دالة اختيارية (body -> bool) للتحقق أن المحتوى حقيقي وليس صفحة خداع
     (بعض المواقع خلف Cloudflare تُرجع صفحات 200 مزيفة لبروكسي جوجل — مثل twkan.com)؛
     أي رد يفشل التحقق يُعامل كحجب ويُنتقل للطريقة التالية دون تخزين الطريقة الفاشلة.
+
+    post_data: بيانات POST اختيارية (dict) — تُمرر لطريقتي FlareSolverr وScraperAPI
+    فقط (المباشر وبروكسي جوجل GET دائماً وهو يعادل POST في admin-ajax).
     """
     parsed = urlparse(url)
     domain = parsed.netloc
 
     # قراءة الإعدادات من البيئة عند كل نداء (حتى تعمل التغييرات بدون إعادة نشر)
     flaresolverr = os.environ.get('FLARESOLVR_URL', '').rstrip('/')
-    scraperapi_key = os.environ.get('SCRAPERAPI_KEY', '')
+    scraperapi_key = os.environ.get('SCRAPERAPI_KEY', '') or os.environ.get('SCRAPERAPI_KEYS', '')
     residential = os.environ.get('RESIDENTIAL_PROXY', '')
     cf_worker = os.environ.get('CF_WORKER_URL', '').rstrip('/')
 
@@ -366,15 +575,15 @@ def smart_get(url, sl='en', tl='es', referer=None, timeout=25,
 
     # ---------- الطريقة 4: FlareSolverr ----------
     if flaresolverr:
-        r = _flaresolverr_get(url, validate=validate)
+        r = _flaresolverr_get(url, validate=validate, post_data=post_data)
         if r is not None:
             if use_route_cache:
                 _DOMAIN_ROUTE_CACHE[domain] = 'flaresolverr'
             return r
 
-    # ---------- الطريقة 5: ScraperAPI ----------
-    if scraperapi_key:
-        r = _scraperapi_get(url, referer=referer, validate=validate)
+    # ---------- الطريقة 5: ScraperAPI (دوران على كل المفاتيح) ----------
+    if scraperapi_key or post_data:
+        r = _scraperapi_get(url, referer=referer, validate=validate, post_data=post_data)
         if r is not None:
             if use_route_cache:
                 _DOMAIN_ROUTE_CACHE[domain] = 'scraperapi'
@@ -867,7 +1076,7 @@ def madara_worker(url, admin_email, metadata, use_cookies=False):
 # ==========================================
 
 def generic_worker(url, admin_email, metadata, chapters_fn, content_fn,
-                   batch_size=5, delay=1.0, base_url_for_join=None):
+                   batch_size=5, delay=1.0, base_url_for_join=None, site_name=''):
     """
     عامل سحب موحّد لأي موقع:
     1. يفحص الفصول الموجودة في الباك إند
@@ -876,8 +1085,9 @@ def generic_worker(url, admin_email, metadata, chapters_fn, content_fn,
 
     chapters_fn(url) -> [{'number': int, 'url': str, 'title': str}, ...]
     content_fn(url)  -> str or None
+    site_name: اسم الموقع للعرض في رسائل الخطأ (اختياري)
     """
-    from .backend import send_data_to_backend, check_existing_chapters
+    from .backend import send_data_to_backend, check_existing_chapters, push_log
 
     try:
         existing_chapters = check_existing_chapters(metadata['title'])
@@ -897,7 +1107,12 @@ def generic_worker(url, admin_email, metadata, chapters_fn, content_fn,
         all_chapters = []
 
     if not all_chapters:
-        print(f"No chapters found for {metadata['title']}")
+        # 🔊 فشل صريح ومرئي في كونسول التطبيق (لا نكتفي بالسجل المحلي)
+        tag = site_name or 'الموقع'
+        print(f"❌ No chapters found for {metadata['title']} ({tag})")
+        push_log(f"❌ [{tag}] فشل جلب قائمة الفصول للرواية '{metadata.get('title', '?')}' — "
+                 f"لم يُسحب أي فصل. راجع سبب الفشل في سجلات السكرابر. "
+                 f"إن كانت الرسالة تتكرر فأضف/جدد مفاتيح ScraperAPI من واجهة المفاتيح.", 'error')
         return
 
     print(f"Processing {len(all_chapters)} chapters.")

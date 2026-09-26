@@ -975,7 +975,11 @@ def fetch_metadata_scribblehub(url):
 
 def fetch_chapter_list_scribblehub(url):
     """قائمة الفصول عبر admin-ajax (wi_getreleases_pagination)
-    نجرب POST مباشر أولاً ثم GET عبر بروكسي الترجمة (نجربة أذكى)"""
+    ScribbleHub يحجب IP السيرفرات بحماية Cloudflare صرامة جداً (حتى بروكسي جوجل)،
+    لذا نجرب بالترتيب: POST مباشر بانتحال بصمة كروم ← GET عبر smart_get
+    (بروكسي جوجل/worker إن ضُبط) ← POST عبر smart_get (FlareSolverr/ScraperAPI
+    مع دوران كل المفاتيح). عند الفشل: رسالة صريحة في كونسول التطبيق."""
+    from core.utils import _direct_post, push_log
     chapters = []
     try:
         # استخراج معرف الرواية من الرابط /series/{id}/{slug}/
@@ -984,35 +988,56 @@ def fetch_chapter_list_scribblehub(url):
             print("ScribbleHub: cannot extract series id")
             return []
         series_id = match.group(1)
+        ajax_data = {
+            'action': 'wi_getreleases_pagination',
+            'pagenum': '-1',
+            'mypostid': series_id,
+        }
+        ajax_url = ('https://www.scribblehub.com/wp-admin/admin-ajax.php'
+                    f'?action=wi_getreleases_pagination&pagenum=-1&mypostid={series_id}')
 
-        # 1) POST مباشر (يعمل إذا كان IP السيرفر غير محجوب)
+        # 1) POST مباشر بانتحال بصمة متصفح كروم (curl_cffi)
         try:
-            response = requests.post(
+            response = _direct_post(
                 'https://www.scribblehub.com/wp-admin/admin-ajax.php',
-                data={
-                    'action': 'wi_getreleases_pagination',
-                    'pagenum': '-1',
-                    'mypostid': series_id,
-                },
+                data=ajax_data,
                 headers=get_headers(referer=url),
                 timeout=30,
             )
             if response.status_code == 200 and 'toc_w' in response.text:
                 soup = parse_html(response.content)
                 return _scribblehub_parse_toc(soup)
+            print(f"ScribbleHub direct POST blocked: HTTP {response.status_code}")
         except Exception as e:
             print(f"ScribbleHub direct POST failed: {str(e)[:60]}")
 
-        # 2) GET عبر smart_get (بروكسي الترجمة يمرر admin-ajax أحياناً)
-        ajax_url = ('https://www.scribblehub.com/wp-admin/admin-ajax.php'
-                    f'?action=wi_getreleases_pagination&pagenum=-1&mypostid={series_id}')
+        # 2) GET عبر smart_get (بروكسي جوجل/worker إن نجحا)
         response = smart_get(ajax_url, timeout=35, referer=url)
         if response is not None and response.status_code == 200 and 'toc_w' in response.text:
             soup = parse_html(response.content)
             return _scribblehub_parse_toc(soup)
 
+        # 3) POST عبر smart_get → FlareSolverr/ScraperAPI (دوران كل المفاتيح)
+        response = smart_get('https://www.scribblehub.com/wp-admin/admin-ajax.php',
+                             timeout=35, referer=url, post_data=ajax_data)
+        if response is not None and response.status_code == 200 and 'toc_w' in response.text:
+            soup = parse_html(response.content)
+            return _scribblehub_parse_toc(soup)
+
+        # 4) فرض مسار ScraperAPI بGET على رابط ajax (لو حُفظت طريقة فاشلة في الكاش)
+        from core.utils import _scraperapi_get
+        r = _scraperapi_get(ajax_url, referer=url,
+                            validate=lambda b: 'toc_w' in b)
+        if r is not None and 'toc_w' in r.text:
+            soup = parse_html(r.content)
+            return _scribblehub_parse_toc(soup)
+
         print("ScribbleHub: TOC blocked from this server (Cloudflare). "
-              "اضبط FLARESOLVR_URL أو SCRAPERAPI_KEY لتفعيل هذا الموقع.")
+              "أضف مفاتيح ScraperAPI صالحة من واجهة المفاتيح (SCRAPERAPI_KEYS) "
+              "أو ضبط FLARESOLVR_URL.")
+        push_log("❌ [ScribbleHub] قائمة الفصول محجوبة من خادم السكرابر (Cloudflare صارم). "
+                 "الموقع يحتاج مفتاح ScraperAPI صالح — أضف مفاتيحك من شاشة "
+                 "'مفاتيح ScraperAPI' ثم أعد المحاولة.", 'error')
         return []
     except Exception as e:
         print(f"Error ScribbleHub List: {e}")
@@ -1061,7 +1086,7 @@ def scrape_chapter_scribblehub(url):
 
 
 def worker_scribblehub(url, admin_email, metadata):
-    generic_worker(url, admin_email, metadata, fetch_chapter_list_scribblehub, scrape_chapter_scribblehub, delay=1.5)
+    generic_worker(url, admin_email, metadata, fetch_chapter_list_scribblehub, scrape_chapter_scribblehub, delay=1.5, site_name='ScribbleHub')
 
 
 # ==========================================

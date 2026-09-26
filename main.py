@@ -23,6 +23,8 @@
 - POST /scheduler/config  {active, interval, adminEmail}
 - GET  /scheduler/status
 - GET  /sites              (جديد: قائمة المواقع المدعومة)
+- POST /scraperapi/keys   {keys: [...]}          (جديد: مفاتيح ScraperAPI متعددة)
+- GET  /scraperapi/keys                          (جديد: ملخص حالة المفاتيح)
 """
 
 import time
@@ -74,6 +76,38 @@ def health_check_plain():
 @app.route('/sites', methods=['GET'])
 def list_sites():
     return jsonify(get_registry()), 200
+
+
+# ==========================================
+# 🛰️ مفاتيح ScraperAPI (من واجهة التطبيق)
+# ==========================================
+# POST /scraperapi/keys  {keys: [...]} أو {text: "k1\nk2\nk3"} — ضبط/تحديث المفاتيح
+# GET  /scraperapi/keys                    — ملخص حالات المفاتيح (مخفاة)
+@app.route('/scraperapi/keys', methods=['POST'])
+def set_scraperapi_keys_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    try:
+        from core.utils import set_scraperapi_keys, get_scraperapi_status
+        data = request.json or {}
+        keys = data.get('keys') or data.get('text') or ''
+        saved = set_scraperapi_keys(keys)
+        return jsonify({
+            'message': f'ScraperAPI keys updated: {len(saved)} valid key(s)',
+            'status': get_scraperapi_status(),
+        }), 200
+    except Exception as e:
+        return jsonify({'message': 'Internal Server Error', 'details': str(e)}), 500
+
+
+@app.route('/scraperapi/keys', methods=['GET'])
+def get_scraperapi_keys_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    from core.utils import get_scraperapi_status
+    return jsonify(get_scraperapi_status()), 200
 
 
 # ==========================================

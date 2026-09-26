@@ -47,3 +47,14 @@ def check_existing_chapters(title):
     except Exception as e:
         print(f"❌ Error checking existence: {e}")
         return []
+
+
+def push_log(message, log_type='info'):
+    """🔔 إرسال سجل مرئي إلى كونسول السكرابر في واجهة التطبيق
+    (يظهر فوراً للمشرف في شاشة المراقبة) — لا يرفع استثناءات أبداً"""
+    try:
+        endpoint = f"{NODE_BACKEND_URL}/api/scraper/log"
+        requests.post(endpoint, json={'message': message, 'type': log_type},
+                      headers=_headers(), timeout=15)
+    except Exception as e:
+        print(f"   (log push failed: {str(e)[:60]})")
