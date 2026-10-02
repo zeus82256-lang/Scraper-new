@@ -12,6 +12,7 @@
 6.  Linovel      - linovel.net           ✅ جديد ويعمل بالكامل
 7.  Linovelib TW - tw.linovelib.com      ✅ جديد ويعمل بالكامل (繁體)
 8.  Novel543     - novel543.com          ✅ جديد (Cloudflare متقلب أحياناً)
+11. WFXS         - wfxs.tw (m.wfxs.tw)   ✅ جديد v2.7 (Cloudflare — عبر بروكسي الترجمة)
 """
 
 import os
@@ -2558,4 +2559,292 @@ register_site(
           'الفهرس الكامل /xiaoshuo/{id}/ بترقيم صفحات (300 فصل/صفحة)، والفصل قد يُقسَّم '
           'داخلياً {cid}_2.html ويُتابع تلقائياً. العلامات المائية المسروقة تُنظَّف، '
           'والأغلفة تُمرَّر عبر translate.goog لأنها محجوبة 403 مباشرة.'
+)
+
+
+# ==========================================
+# 🌬️ 11. WFXS (微風小說網 - wfxs.tw)
+# ==========================================
+# الموقع خلف Cloudflare ويحجب IP مراكز البيانات (403 Just a moment) — يُتجاوَز
+# تلقائياً عبر بروكسي ترجمة جوجل داخل smart_get (تم التحقق حياً 200 حقيقية).
+#
+#   كتاب  /xiaoshuo/{id}/                    (البيانات كلها وسوم og:novel:* جاهزة)
+#   فهرس  /booklist/{id}.html → /booklist/{id}/{صفحة}.html (30 فصلاً بالصفحة، maxunm)
+#   فصل   /xiaoshuo/{id}/{cid}/              المحتوى div#read_conent_box بفقرات <p>
+#   الغلاف img.wfxs.tw محجوب 403 مباشرة — يُمرَّر عبر img-wfxs-tw.translate.goog
+#   (تم التحقق: image/jpeg 200). ترقيم الفصول تسلسلي من ترتيب الفهرس لأن معرفات
+#   الفصول (cid) غير متسلسلة.
+
+WFXS_BASE = 'https://m.wfxs.tw'
+WFXS_MAX_TOC_PAGES = 60       # شبكة أمان لترقيم الفهرس (30 فصلاً بالصفحة)
+
+
+def _wfxs_validate(body):
+    """كاشف الصفحات الحقيقية — يرفض تحدي Cloudflare وأي صفحة بلا بصمة الموقع"""
+    if not body:
+        return False
+    if 'Just a moment' in body or 'challenges.cloudflare.com' in body or 'cf-browser-verification' in body:
+        return False
+    return ('wfxs' in body or 'read_conent_box' in body or 'booklist' in body
+            or '/xiaoshuo/' in body or '微風小說' in body)
+
+
+def _wfxs_get(url, timeout=30):
+    """طلب موحّد عبر التوجيه الذكي مع كاشف تحدي Cloudflare"""
+    return smart_get(url, sl='zh-TW', tl='ja', lang='zh-TW,zh;q=0.9',
+                     timeout=timeout, validate=_wfxs_validate, ua=UA_FIREFOX)
+
+
+def _wfxs_book_id(url):
+    """معرف الكتاب من أي رابط (كتاب /xiaoshuo/{id}/ أو فهرس /booklist/{id}...)"""
+    m = (re.search(r'/xiaoshuo/(\d+)', url)
+         or re.search(r'/booklist/(\d+)', url)
+         or re.search(r'wfxs\.tw/(\d+)', url))
+    return m.group(1) if m else None
+
+
+def _wfxs_cover_via_proxy(cover):
+    """الغلاف على img.wfxs.tw محجوب 403 من IP السيرفرات — يُمرَّر عبر translate.goog
+    لنطاق الصور نفسه (تم التحقق: image/jpeg 200). الروابط الأخرى تُترك كما هي."""
+    if not cover:
+        return ''
+    cover = cover.strip()
+    if 'img.wfxs.tw' in cover:
+        path = urlparse(cover).path
+        if path:
+            return f"https://img-wfxs-tw.translate.goog{path}?_x_tr_sl=auto&_x_tr_tl=en&_x_tr_hl=en"
+    return cover
+
+
+def fetch_metadata_wfxs(url):
+    try:
+        bid = _wfxs_book_id(url)
+        if not bid:
+            print("wfxs: cannot extract book id")
+            return None
+        book_url = f"{WFXS_BASE}/xiaoshuo/{bid}/"
+        response = _wfxs_get(book_url)
+        if response is None:
+            print("wfxs: metadata fetch failed (all routes)")
+            return None
+        soup = parse_html(response)
+
+        title = get_meta(soup, prop='og:novel:book_name') \
+            or get_meta(soup, prop='og:title')
+        if not title:
+            h1 = soup.find('h1')
+            title = h1.get_text(strip=True) if h1 else "Unknown Title"
+
+        author = get_meta(soup, prop='og:novel:author') or ""
+        category = get_meta(soup, prop='og:novel:category') or "عام"
+        description = get_meta(soup, prop='og:description')
+        if not description:
+            intro = soup.select_one('.intro, .book_intro, #intro')
+            description = intro.get_text('\n', strip=True) if intro else ""
+
+        raw_status = get_meta(soup, prop='og:novel:status') or ""
+        status = "مكتملة" if ('完' in raw_status or '已' in raw_status) else "مستمرة"
+
+        cover = _wfxs_cover_via_proxy(get_meta(soup, prop='og:image') or "")
+
+        tags = [category] if category and category != "عام" else []
+
+        return {
+            'title': title, 'author': author,
+            'description': description.strip(), 'cover': cover,
+            'status': status, 'category': category, 'tags': tags,
+            'book_id': bid,
+            'sourceUrl': book_url,
+            'lastUpdate': get_meta(soup, prop='og:novel:update_time') or None
+        }
+    except Exception as e:
+        print(f"Error wfxs metadata: {e}")
+        return None
+
+
+def fetch_chapter_list_wfxs(url):
+    """الفهرس الكامل من /booklist/{id}/{صفحة}.html (30 فصلاً بالصفحة).
+    عدد الصفحات يُستنتج من روابط الترقيم /booklist/{id}/{N}.html نفسها."""
+    chapters = []
+    try:
+        bid = _wfxs_book_id(url)
+        if not bid:
+            print("wfxs: cannot extract book id for chapter list")
+            return []
+
+        def _parse_toc_page(soup_obj):
+            found = []
+            for a in soup_obj.find_all('a', href=re.compile(
+                    r'/xiaoshuo/' + bid + r'/\d+/')):
+                href = a.get('href', '')
+                title = a.get_text(' ', strip=True)
+                # نص زخرفي داخل الشارة اليمنى (span.pull-right) يُزال من العنوان
+                if not href or not title:
+                    continue
+                # ⚠️ كتلة «最新章節» الترويجية في أعلى كل صفحة فهرس تحمل رابط
+                # آخر فصل — ليست مدخلاً حقيقياً في القائمة ويجب تجاهلها
+                if '最新章節' in title or '最新章节' in title:
+                    continue
+                cid_m = re.search(r'/xiaoshuo/' + bid + r'/(\d+)', href)
+                if not cid_m:
+                    continue
+                found.append({'cid': cid_m.group(1),
+                              'title': title.strip(),
+                              'href': urljoin(WFXS_BASE + '/', href)})
+            return found
+
+        toc_url = f"{WFXS_BASE}/booklist/{bid}.html"
+        response = _wfxs_get(toc_url, timeout=35)
+        if response is not None:
+            soup = parse_html(response)
+            # قد يعرض /booklist/{id}.html الصفحة الأولى مباشرة أو يحيل لـ/1.html
+            entries = _parse_toc_page(soup)
+            if entries:
+                all_pages = [soup]
+            else:
+                all_pages = []
+        else:
+            entries, all_pages = [], []
+
+        if not entries:
+            first_url = f"{WFXS_BASE}/booklist/{bid}/1.html"
+            response = _wfxs_get(first_url, timeout=35)
+            if response is None:
+                print("wfxs: TOC page 1 failed (all routes)")
+                return []
+            soup = parse_html(response)
+            entries = _parse_toc_page(soup)
+            if not entries:
+                print("wfxs: no chapter entries on TOC page 1")
+                return []
+            all_pages = [soup]
+        else:
+            all_pages = [parse_html(response)] if response is not None else []
+
+        # اكتشاف عدد صفحات الفهرس من روابط الترقيم /booklist/{id}/{N}.html
+        total_pages = 1
+        if all_pages:
+            for a in all_pages[0].find_all('a', href=re.compile(
+                    r'/booklist/' + bid + r'/(\d+)\.html')):
+                m = re.search(r'/booklist/' + bid + r'/(\d+)\.html', a.get('href', ''))
+                if m:
+                    total_pages = max(total_pages, int(m.group(1)))
+        # احتياط: متغير maxunm في السكربت (عدد صفحات الفهرس)
+        if all_pages and total_pages == 1:
+            vm = re.search(r"var\s+maxunm\s*=\s*(\d+)", all_pages[0].get_text() if hasattr(all_pages[0], 'get_text') else '')
+            if not vm and response is not None:
+                try:
+                    vm = re.search(r"var\s+maxunm\s*=\s*(\d+)", response.text)
+                except Exception:
+                    vm = None
+            if vm:
+                total_pages = max(total_pages, int(vm.group(1)))
+        total_pages = min(total_pages, WFXS_MAX_TOC_PAGES)
+
+        for page in range(2, total_pages + 1):
+            time.sleep(random.uniform(0.8, 1.6))
+            p_url = f"{WFXS_BASE}/booklist/{bid}/{page}.html"
+            p_resp = _wfxs_get(p_url, timeout=35)
+            if p_resp is None:
+                print(f"wfxs: TOC page {page}/{total_pages} failed — continuing")
+                continue
+            more = _parse_toc_page(parse_html(p_resp))
+            if not more:
+                break
+            entries.extend(more)
+
+        # ترقيم تسلسلي (معرفات الفصول غير متسلسلة) + إزالة التكرار بالمعرف
+        seen = set()
+        index = 0
+        for e in entries:
+            if e['cid'] in seen:
+                continue
+            seen.add(e['cid'])
+            index += 1
+            chapters.append({'number': index, 'url': e['href'], 'title': e['title']})
+
+        chapters.sort(key=lambda x: x['number'])
+        print(f"✅ wfxs chapters found: {len(chapters)} across {total_pages} TOC page(s)")
+        return chapters
+    except Exception as e:
+        print(f"Error wfxs chapter list: {e}")
+        return chapters
+
+
+def scrape_chapter_wfxs(url):
+    """سحب فصل كامل من div#read_conent_box مع متابعة 下一页 إن قُسّم الفصل داخلياً"""
+    try:
+        parts = []
+        current = url
+        for _page in range(1, 8):
+            response = _wfxs_get(current, timeout=30)
+            if response is None:
+                return None
+            soup = parse_html(response)
+            content = (soup.select_one('#read_conent_box')
+                       or soup.select_one('div.entry#read_conent_box')
+                       or soup.select_one('.read_conent_box'))
+            if content is None:
+                return None
+
+            for bad in content.find_all(['script', 'style', 'ins', 'iframe', 'a']):
+                bad.decompose()
+            for p in content.find_all('p'):
+                if not p.get_text(strip=True):
+                    p.decompose()
+
+            text = content.get_text('\n', strip=True)
+            if text.strip():
+                parts.append(text.strip())
+
+            # تقسيم داخلي محتمل: رابط 下一页 لنفس cid بصيغة صفحة تالية
+            next_a = None
+            cid_m = re.search(r'/xiaoshuo/\d+/(\d+)', current)
+            cid = cid_m.group(1) if cid_m else None
+            for a in soup.find_all('a', href=True):
+                label = a.get_text(strip=True)
+                if label not in ('下一页', '下一頁'):
+                    continue
+                href = a['href']
+                if cid and cid in href and href.rstrip('/').endswith(('/', '.html')) and 'booklist' not in href:
+                    next_a = href
+                    break
+            if not next_a:
+                break
+            next_a = urljoin(WFXS_BASE + '/', next_a)
+            if next_a == current:
+                break
+            current = next_a
+            time.sleep(random.uniform(0.8, 1.6))
+
+        full = '\n\n'.join(parts)
+        full = clean_text(full)
+        if len(full.strip()) < 50:
+            return None
+        return full
+    except Exception as e:
+        print(f"Error wfxs chapter: {e}")
+        return None
+
+
+def worker_wfxs(url, admin_email, metadata):
+    generic_worker(url, admin_email, metadata,
+                   fetch_chapter_list_wfxs, scrape_chapter_wfxs,
+                   batch_size=5, delay=1.2, site_name='wfxs (微風小說網)')
+
+
+register_site(
+    domain_patterns=['wfxs.tw', 'm.wfxs.tw', 'www.wfxs.tw'],
+    name='WFXS (微風小說網)',
+    language='chinese',
+    fetch_metadata=fetch_metadata_wfxs,
+    fetch_chapters=fetch_chapter_list_wfxs,
+    fetch_content=scrape_chapter_wfxs,
+    worker=worker_wfxs,
+    status='active',
+    notes='جديد (v2.7)! الموقع خلف Cloudflare (403 من IP السيرفرات) — يعمل تلقائياً '
+          'عبر بروكسي ترجمة جوجل داخل smart_get. بيانات الكتاب من وسوم og:novel:* '
+          'في /xiaoshuo/{id}/، والفهرس /booklist/{id}/{صفحة}.html (30 فصلاً بالصفحة) '
+          'بترقيم تسلسلي لأن معرفات الفصول غير متسلسلة، والمحتوى div#read_conent_box. '
+          'أغلفة img.wfxs.tw المحجوبة 403 تُمرَّر عبر img-wfxs-tw.translate.goog.'
 )
