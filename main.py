@@ -28,6 +28,9 @@
 - POST /tomatomtl/cookies {cookies}              (جديد: كوكيز حساب TomatoMTL)
 - GET  /tomatomtl/cookies                        (جديد: ملخص مخفى للكوكيز)
 - POST /tomatomtl/check                          (جديد: فحص حي لجلسة الحساب)
+- POST /wtrlab/cookies {cookies}                 (جديد: كوكيز حساب WTR-LAB)
+- GET  /wtrlab/cookies                           (جديد: ملخص مخفى للكوكيز)
+- POST /wtrlab/check                             (جديد: فحص حي لجلسة القراءة)
 """
 
 import time
@@ -149,6 +152,49 @@ def check_tomatomtl_session_route():
         return jsonify({'message': 'Unauthorized'}), 401
     try:
         from sites.tomatomtl import quick_session_check
+        return jsonify(quick_session_check()), 200
+    except Exception as e:
+        return jsonify({'ok': False, 'message': f'فحص داخلي فاشل: {str(e)[:120]}'}), 500
+
+
+# ==========================================
+# 🍪 كوكيز WTR-LAB (حساب قارئ wtr-lab.com — من واجهة الموقع/التطبيق)
+# ==========================================
+# البيانات والفهرس تعمل بلا جلسة؛ محتوى الفصول يحتاج جلسة (Turnstile) —
+# الكوكيز تُلصق من الواجهة (ترويسة Cookie من متصفح مسجل الدخول).
+# POST /wtrlab/cookies {cookies: "name=v; ..."} — ضبط/تحديث (فارغ = تصفير)
+# GET  /wtrlab/cookies                          — ملخص مخفى (أسماء الكوكيز)
+# POST /wtrlab/check                            — فحص حي: هل قراءة الفصول تعمل؟
+@app.route('/wtrlab/cookies', methods=['POST'])
+def set_wtrlab_cookies_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    try:
+        from sites.wtrlab import set_runtime_cookies, cookie_summary
+        data = request.json or {}
+        set_runtime_cookies(str(data.get('cookies') or ''))
+        return jsonify({'message': 'WTR-LAB cookies updated', 'status': cookie_summary()}), 200
+    except Exception as e:
+        return jsonify({'message': 'Internal Server Error', 'details': str(e)}), 500
+
+
+@app.route('/wtrlab/cookies', methods=['GET'])
+def get_wtrlab_cookies_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    from sites.wtrlab import cookie_summary
+    return jsonify(cookie_summary()), 200
+
+
+@app.route('/wtrlab/check', methods=['POST'])
+def check_wtrlab_session_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    try:
+        from sites.wtrlab import quick_session_check
         return jsonify(quick_session_check()), 200
     except Exception as e:
         return jsonify({'ok': False, 'message': f'فحص داخلي فاشل: {str(e)[:120]}'}), 500
@@ -352,6 +398,7 @@ if __name__ == "__main__":
 #   20. Linovelib TW      - https://tw.linovelib.com        ✅ جديد
 #   21. Novel543          - https://www.novel543.com        ✅ جديد
 #   23. TomatoMTL         - https://tomatomtl.com           ✅ جديد (v2.8 — جلسة حساب، كوكيز من الواجهة)
+#   24. WTR-LAB           - https://wtr-lab.com             ✅ جديد (v2.9 — بيانات/فهرس مجانيان، الفصول بجلسة)
 # كوري:
 #   22. Agitoon           - https://agit664.xyz (+ دوران)   ✅ جديد
 #

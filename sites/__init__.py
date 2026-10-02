@@ -15,3 +15,4 @@ from . import english     # noqa: F401
 from . import chinese     # noqa: F401
 from . import korean      # noqa: F401
 from . import tomatomtl   # noqa: F401 — موقع مصادق (كوكيز حساب من واجهة السكرابر)
+from . import wtrlab      # noqa: F401 — موقع مصادق جزئياً (كوكيز للفصول، البيانات مجانية)
