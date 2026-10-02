@@ -31,6 +31,12 @@
 - POST /wtrlab/cookies {cookies}                 (جديد: كوكيز حساب WTR-LAB)
 - GET  /wtrlab/cookies                           (جديد: ملخص مخفى للكوكيز)
 - POST /wtrlab/check                             (جديد: فحص حي لجلسة القراءة)
+- POST /tadu/cookies {cookies}                   (جديد: كوكيز اختيارية لتوسيع قراءة Tadu)
+- GET  /tadu/cookies                             (جديد: ملخص مخفى للكوكيز)
+- POST /tadu/check                               (جديد: فحص حي — هل القراءة موسّعة؟)
+- POST /jhbook/cookies {cookies}                 (جديد: كوكيز جلسة تاوباو لقراءة الفصول)
+- GET  /jhbook/cookies                           (جديد: ملخص مخفى للكوكيز)
+- POST /jhbook/check                             (جديد: فحص حي لجلسة القراءة)
 """
 
 import time
@@ -196,6 +202,88 @@ def check_wtrlab_session_route():
     try:
         from sites.wtrlab import quick_session_check
         return jsonify(quick_session_check()), 200
+    except Exception as e:
+        return jsonify({'ok': False, 'message': f'فحص داخلي فاشل: {str(e)[:120]}'}), 500
+
+
+# ==========================================
+# 🍊 كوكيز Tadu (اختيارية — توسّع القراءة بعد 30 فصلاً مجانياً للزائر)
+# ==========================================
+# POST /tadu/cookies {cookies: "name=v; ..."} — ضبط/تحديث (فارغ = وضع الزائر)
+# GET  /tadu/cookies                       — ملخص مخفى (مصدر الكوكيز + الأسماء)
+# POST /tadu/check                         — فحص حي: هل القراءة موسّعة فعلاً؟
+@app.route('/tadu/cookies', methods=['POST'])
+def set_tadu_cookies_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    try:
+        from sites.cnextra import set_tadu_runtime_cookies, tadu_cookie_summary
+        data = request.json or {}
+        set_tadu_runtime_cookies(str(data.get('cookies') or ''))
+        return jsonify({'message': 'Tadu cookies updated', 'status': tadu_cookie_summary()}), 200
+    except Exception as e:
+        return jsonify({'message': 'Internal Server Error', 'details': str(e)}), 500
+
+
+@app.route('/tadu/cookies', methods=['GET'])
+def get_tadu_cookies_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    from sites.cnextra import tadu_cookie_summary
+    return jsonify(tadu_cookie_summary()), 200
+
+
+@app.route('/tadu/check', methods=['POST'])
+def check_tadu_session_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    try:
+        from sites.cnextra import tadu_quick_session_check
+        return jsonify(tadu_quick_session_check()), 200
+    except Exception as e:
+        return jsonify({'ok': False, 'message': f'فحص داخلي فاشل: {str(e)[:120]}'}), 500
+
+
+# ==========================================
+# 🟦 كوكيز Taobao JH (جلسة تاوباو — قراءة الفصول تتطلب تسجيل دخول مؤكد)
+# ==========================================
+# POST /jhbook/cookies {cookies: "name=v; ..."} — ضبط/تحديث (فارغ = وضع الزائر)
+# GET  /jhbook/cookies                          — ملخص مخفى (أسماء الكوكيز)
+# POST /jhbook/check                            — فحص حي: هل قراءة الفصول تعمل؟
+@app.route('/jhbook/cookies', methods=['POST'])
+def set_jhbook_cookies_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    try:
+        from sites.cnextra import set_jhbook_runtime_cookies, jhbook_cookie_summary
+        data = request.json or {}
+        set_jhbook_runtime_cookies(str(data.get('cookies') or ''))
+        return jsonify({'message': 'TaobaoJH cookies updated', 'status': jhbook_cookie_summary()}), 200
+    except Exception as e:
+        return jsonify({'message': 'Internal Server Error', 'details': str(e)}), 500
+
+
+@app.route('/jhbook/cookies', methods=['GET'])
+def get_jhbook_cookies_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    from sites.cnextra import jhbook_cookie_summary
+    return jsonify(jhbook_cookie_summary()), 200
+
+
+@app.route('/jhbook/check', methods=['POST'])
+def check_jhbook_session_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    try:
+        from sites.cnextra import jhbook_quick_session_check
+        return jsonify(jhbook_quick_session_check()), 200
     except Exception as e:
         return jsonify({'ok': False, 'message': f'فحص داخلي فاشل: {str(e)[:120]}'}), 500
 
@@ -399,6 +487,11 @@ if __name__ == "__main__":
 #   21. Novel543          - https://www.novel543.com        ✅ جديد
 #   23. TomatoMTL         - https://tomatomtl.com           ✅ جديد (v2.8 — جلسة حساب، كوكيز من الواجهة)
 #   24. WTR-LAB           - https://wtr-lab.com             ✅ جديد (v2.9 — بيانات/فهرس مجانيان، الفصول بجلسة)
+#   25. Tadu              - https://www.tadu.com            ✅ جديد (v3.0 — 30 فصلاً مجاناً، كوكيز اختيارية)
+#   26. Bixiange          - http://www.bixiange.top         ✅ جديد (v3.0 — Empire CMS / GBK)
+#   27. FFXS8             - https://www.ffxs8.com           ✅ جديد (v3.0 — نفس القالب)
+#   28. JPXS123           - http://jpxs123.com              ✅ جديد (v3.0 — نفس القالب)
+#   29. TaobaoJH          - https://jhbook.taobao.com       ✅ جديد (v3.0 — بيانات/فهرس مجانيان، الفصول بجلسة)
 # كوري:
 #   22. Agitoon           - https://agit664.xyz (+ دوران)   ✅ جديد
 #
