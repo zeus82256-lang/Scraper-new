@@ -25,6 +25,9 @@
 - GET  /sites              (جديد: قائمة المواقع المدعومة)
 - POST /scraperapi/keys   {keys: [...]}          (جديد: مفاتيح ScraperAPI متعددة)
 - GET  /scraperapi/keys                          (جديد: ملخص حالة المفاتيح)
+- POST /tomatomtl/cookies {cookies}              (جديد: كوكيز حساب TomatoMTL)
+- GET  /tomatomtl/cookies                        (جديد: ملخص مخفى للكوكيز)
+- POST /tomatomtl/check                          (جديد: فحص حي لجلسة الحساب)
 """
 
 import time
@@ -108,6 +111,47 @@ def get_scraperapi_keys_route():
         return jsonify({'message': 'Unauthorized'}), 401
     from core.utils import get_scraperapi_status
     return jsonify(get_scraperapi_status()), 200
+
+
+# ==========================================
+# 🍪 كوكيز TomatoMTL (حساب قارئ tomatomtl.com — من واجهة الموقع/التطبيق)
+# ==========================================
+# POST /tomatomtl/cookies {cookies: "name=v; ..."} — ضبط/تحديث (فارغ = الرجوع للثابتة بالكود)
+# GET  /tomatomtl/cookies                          — ملخص مخفى (مصدر الكوكيز + الأسماء)
+# POST /tomatomtl/check                            — فحص حي: هل الجلسة مسجلة الدخول فعلاً؟
+@app.route('/tomatomtl/cookies', methods=['POST'])
+def set_tomatomtl_cookies_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    try:
+        from sites.tomatomtl import set_runtime_cookies, cookie_summary
+        data = request.json or {}
+        set_runtime_cookies(str(data.get('cookies') or ''))
+        return jsonify({'message': 'TomatoMTL cookies updated', 'status': cookie_summary()}), 200
+    except Exception as e:
+        return jsonify({'message': 'Internal Server Error', 'details': str(e)}), 500
+
+
+@app.route('/tomatomtl/cookies', methods=['GET'])
+def get_tomatomtl_cookies_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    from sites.tomatomtl import cookie_summary
+    return jsonify(cookie_summary()), 200
+
+
+@app.route('/tomatomtl/check', methods=['POST'])
+def check_tomatomtl_session_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    try:
+        from sites.tomatomtl import quick_session_check
+        return jsonify(quick_session_check()), 200
+    except Exception as e:
+        return jsonify({'ok': False, 'message': f'فحص داخلي فاشل: {str(e)[:120]}'}), 500
 
 
 # ==========================================
@@ -307,6 +351,7 @@ if __name__ == "__main__":
 #   19. Linovel           - https://www.linovel.net         ✅ جديد
 #   20. Linovelib TW      - https://tw.linovelib.com        ✅ جديد
 #   21. Novel543          - https://www.novel543.com        ✅ جديد
+#   23. TomatoMTL         - https://tomatomtl.com           ✅ جديد (v2.8 — جلسة حساب، كوكيز من الواجهة)
 # كوري:
 #   22. Agitoon           - https://agit664.xyz (+ دوران)   ✅ جديد
 #

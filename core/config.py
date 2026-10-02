@@ -34,6 +34,21 @@ MARKAZ_COOKIES = os.environ.get(
 )
 
 # ==========================================
+# 🍪 كوكيز TomatoMTL الثابتة (tomatomtl.com — حساب قارئ)
+# ==========================================
+# المستخدم طلب وضعها مباشرة في الكود لأن الجزء المهم منها طويل الأمد:
+#   remember_*  = كوكي «تذكرني» (Laravel) يصلح ≈ 5 سنوات — هو الأساس
+#   PHPSESSID   = جلسة قصيرة العمر (ساعات) — remember_ يجدد الدخول تلقائياً
+#   cf_clearance= حماية Cloudflare قصيرة ومرتبطة بـ IP/UA المتصفح الذي أنشأها
+#                 (لا تعمل من عنوان سيرفر مختلف — مجرد قيمة احتياطية هنا)
+# لتحديثها لاحقاً بدون نشر جديد: حقل «كوكيز TomatoMTL» في واجهة السكرابر
+# (الموقع والتطبيق بنفس الواجهة) — الحقل الفارغ يعني: استخدم هذه الثابتة.
+DEFAULT_TOMATOMTL_COOKIES = os.environ.get(
+    'TOMATOMTL_COOKIES',
+    'cf_clearance=alvbHRPkSSaWrtoOVhRFGrz8P_tbInkpDGYghdal00w-1790935815-1.2.1.1-P0Igsp3EJhUG94kDQrmQeVNw28aQdWQ1gKBOOWoPojqZtyXDb25i12M00zuttCOSB2nFZ.D4b8sJuCwiJdDRQ4YSwBAHYU0LkpzwrpwcIw7qiWxOChm1SFrT3I0kURJJa14BXe9gsnAid42Ciuw4YSM2pYmSh0ZuyixNdhnbKTuFJaacnemyG2ak2OHwqL3gftow7sVIuOcTnospQV00kQD93S4Psz5NULSuDGj1.ZPCrwasUHxn4Tzq4SLX.oE4pnuKtUXnwU8Wt0OclCpVNBmSPJpBXc3KXmlLGqQNuzFVqAK7zUsWOkXb4smRvDG0T3Fh.hfOn9YXZC_LQxnKmHtzeowGP5efg3JSAtNdtxo; _ga_RCS34C198F=GS2.1.s1790935815$o1$g1$t1790936075$j13$l0$h0; _ga=GA1.1.1632139315.1790935815; __gads=ID=dd86b5f3935831a7:T=1790935816:RT=1790935816:S=ALNI_Mb8o6J02fnecKf2sEIH7GaZma__Hg; __gpi=UID=000015513a14839f:T=1790935816:RT=1790935816:S=ALNI_MYPw3ITP6oXPQRupPazBaYCSXWXcw; __eoi=ID=29c5e103f5eb3c6e:T=1790935816:RT=1790935816:S=AA-Afja4SOhjoQaaDDdyLlFvBcBO; FCCDCF=%5Bnull%2Cnull%2Cnull%2Cnull%2Cnull%2Cnull%2C%5B%5B32%2C%22%5B%5C%220292b987-58f8-4819-ad3c-64dfa2251659%5C%22%2C%5B1790935816%2C501000000%5D%5D%22%5D%5D%5D; FCNEC=%5B%5B%22AKsRol_8Thwc9hst6OPNP9QOWoerJh-eDKJJNnhXuzMiYxRaE772t8C3foR3GkmD0mhhTwW0DJkXPLY77nfkWXyEpbIKCeyizgg7FTsgMvSg4kq6Y7BdLC2smPkZ1SxVY5PpCbDQ_bTlFwyx6A1Fu2kck0E0ZVs1eQ%3D%3D%22%5D%5D; translator_button=en; remember_6TpGq1xR_F05q3tke-JkBw=wJwdY-taHOAxK15ymm9RarLW%7E5pnIX134L0vGDX5N3ROrYxcV_4xWJFLS; PHPSESSID=t349n0dhnsm74n6mqasln6rvne'
+)
+
+# ==========================================
 # 🔄 حالة الجدولة التلقائية العامة (Scheduler)
 # ==========================================
 SCHEDULER_CONFIG = {
