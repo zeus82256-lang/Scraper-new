@@ -16,6 +16,7 @@ import os
 import re
 import time
 import json
+import threading
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
@@ -1030,6 +1031,94 @@ def madara_scrape_chapter(url, use_cookies=False):
         return None
 
 
+# ==========================================
+# 🎯 فلتر نطاق الفصول (سحب انتقائي لتوفير الاستهلاك)
+# ==========================================
+# يسمح بسحب فصول محددة بدل الرواية كاملة:
+#   "10"        → الفصل 10 فقط
+#   "12,50"     → الفصلان 12 و50 فقط
+#   "10-20"     → من 10 إلى 20
+#   "10-!"      → من 10 إلى آخر فصل
+#   "1-50,80,90-!" → مزيج
+# يُضبط قبل تشغيل خيط العامل (thread-local) فيقرأه العامل بعد جلب الفهرس،
+# والتطابق يكون مع أرقام الفصول الفعلية في الفهرس (كمنطق نطاق الترجمة في التطبيق).
+# ==========================================
+
+_chapter_spec_local = threading.local()
+
+
+def set_current_chapter_spec(spec):
+    """ضبط فلتر الفصول للخيط الحالي (من /scrape قبل تشغيل العامل)"""
+    _chapter_spec_local.spec = str(spec).strip() if spec and str(spec).strip() else None
+
+
+def get_current_chapter_spec():
+    return getattr(_chapter_spec_local, 'spec', None)
+
+
+def parse_chapter_spec_tokens(spec):
+    """تحليل بنية النص فقط (بلا حاجة للإجمالي) — للتحقق المبكر في /scrape.
+    يعيد قائمة توكنات [(kind, a[, b])] أو None إن كان النص غير صالح."""
+    if spec is None:
+        return None
+    text = str(spec).strip().replace('،', ',')  # فاصلة عربية احتياطاً
+    if not text:
+        return None
+    tokens = []
+    for raw in text.split(','):
+        raw = raw.strip()
+        if not raw:
+            continue
+        m_open = re.fullmatch(r'(\d+)\s*-\s*(!|آخر|last|end)', raw, re.IGNORECASE)
+        m_range = re.fullmatch(r'(\d+)\s*-\s*(\d+)', raw)
+        m_single = re.fullmatch(r'\d+', raw)
+        if m_open:
+            tokens.append(('open', int(m_open.group(1))))
+        elif m_range:
+            a, b = int(m_range.group(1)), int(m_range.group(2))
+            if a > b:
+                a, b = b, a
+            tokens.append(('range', a, b))
+        elif m_single:
+            tokens.append(('single', int(raw)))
+        else:
+            return None
+    return tokens if tokens else None
+
+
+def apply_chapter_filter(all_chapters):
+    """تطبيق الفلتر على قائمة الفصول داخل خيط العامل (يعيد القائمة كما هي إن لم يُضبط فلتر)."""
+    try:
+        spec = get_current_chapter_spec()
+        if not spec or not all_chapters:
+            return all_chapters
+        tokens = parse_chapter_spec_tokens(spec)
+        if tokens is None:
+            print(f"⚠️ تجاهُل فلتر الفصول غير الصالح: {spec!r} — سيُسحب كل الفهرس")
+            return all_chapters
+        available = {int(c.get('number')) for c in all_chapters if c.get('number') is not None}
+        max_num = max(available) if available else 0
+        allowed = set()
+        for tok in tokens:
+            if tok[0] == 'single':
+                if tok[1] in available:
+                    allowed.add(tok[1])
+            elif tok[0] == 'range':
+                for n in range(tok[1], tok[2] + 1):
+                    if n in available:
+                        allowed.add(n)
+            elif tok[0] == 'open':
+                for n in range(tok[1], max_num + 1):
+                    if n in available:
+                        allowed.add(n)
+        filtered = [c for c in all_chapters if int(c.get('number')) in allowed]
+        print(f"🎯 فلتر الفصول '{spec}': {len(all_chapters)} في الفهرس → {len(filtered)} فصلاً للسحب")
+        return filtered
+    except Exception as e:
+        print(f"⚠️ خطأ في فلتر الفصول ({e}) — سيُسحب كل الفهرس")
+        return all_chapters
+
+
 def madara_worker(url, admin_email, metadata, use_cookies=False):
     """العامل الكامل لمواقع Madara"""
     from .backend import send_data_to_backend, check_existing_chapters
@@ -1046,6 +1135,12 @@ def madara_worker(url, admin_email, metadata, use_cookies=False):
 
     if not all_chapters:
         print(f"No chapters found for {metadata['title']}")
+        return
+
+    # 🎯 سحب انتقائي: طبّق فلتر النطاق إن وُضع من /scrape
+    all_chapters = apply_chapter_filter(all_chapters)
+    if not all_chapters:
+        print("No chapters match the chapter filter — nothing to scrape.")
         return
 
     print(f"Processing {len(all_chapters)} chapters.")
@@ -1113,6 +1208,13 @@ def generic_worker(url, admin_email, metadata, chapters_fn, content_fn,
         push_log(f"❌ [{tag}] فشل جلب قائمة الفصول للرواية '{metadata.get('title', '?')}' — "
                  f"لم يُسحب أي فصل. راجع سبب الفشل في سجلات السكرابر. "
                  f"إن كانت الرسالة تتكرر فأضف/جدد مفاتيح ScraperAPI من واجهة المفاتيح.", 'error')
+        return
+
+    # 🎯 سحب انتقائي: طبّق فلتر النطاق إن وُضع من /scrape
+    all_chapters = apply_chapter_filter(all_chapters)
+    if not all_chapters:
+        push_log(f"🎯 [{site_name or 'الموقع'}] فلتر الفصول لم يطابق أي فصل في الفهرس "
+                 f"({metadata.get('title', '?')}) — لم يُسحب شيء. تأكد من النطاق.", 'warning')
         return
 
     print(f"Processing {len(all_chapters)} chapters.")

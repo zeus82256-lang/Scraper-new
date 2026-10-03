@@ -26,6 +26,7 @@ from core.utils import (
     http_get, parse_html, get_headers, get_base_url, fix_image_url,
     parse_relative_date, clean_text,
     madara_fetch_metadata, madara_worker,
+    get_current_chapter_spec, parse_chapter_spec_tokens,
 )
 
 
@@ -134,11 +135,40 @@ def worker_rewayat_probe(url, admin_email, metadata):
 
     send_data_to_backend({'adminEmail': admin_email, 'novelData': metadata, 'chapters': [], 'skipMetadataUpdate': skip_meta})
 
-    current_chapter = 1
+    # 🎯 سحب انتقائي: فلتر أرقام الفصول إن وُضع من /scrape ("10-20" / "12,50" / "10-!")
+    spec = get_current_chapter_spec()
+    tokens = parse_chapter_spec_tokens(spec) if spec else None
+
+    def _allowed(n):
+        if not tokens:
+            return True
+        for tok in tokens:
+            if tok[0] == 'single' and tok[1] == n:
+                return True
+            if tok[0] == 'range' and tok[1] <= n <= tok[2]:
+                return True
+            if tok[0] == 'open' and n >= tok[1]:
+                return True
+        return False
+
+    if tokens:
+        closed_max = [t[2] for t in tokens if t[0] == 'range'] + [t[1] for t in tokens if t[0] == 'single']
+        hard_max = max(closed_max + [5000]) if any(t[0] == 'open' for t in tokens) else max(closed_max)
+        start_at = min(t[1] for t in tokens)
+        print(f"🎯 فلتر الفصول '{spec}' على نادي الروايات: يفحص من {start_at} حتى {hard_max}")
+    else:
+        hard_max = 5000
+        start_at = 1
+
+    current_chapter = start_at
     errors = 0
     batch = []
 
-    while current_chapter < 5000 and errors < 15:
+    while current_chapter <= hard_max and errors < 15:
+        if not _allowed(current_chapter):
+            current_chapter += 1
+            continue
+
         if current_chapter in existing_chapters:
             current_chapter += 1
             errors = 0

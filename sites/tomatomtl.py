@@ -892,6 +892,9 @@ def worker_tomatomtl(url, admin_email, metadata):
         max_waits = max(1, int(os.environ.get('TOMATOMTL_MAX_LIMIT_WAITS', str(LIMIT_WAITS_MAX_DEFAULT))))
         with TomatoMTLClient() as client:
             chapters = garden_chapters(url) if garden else client.chapters(bid)
+            # 🎯 سحب انتقائي: طبّق فلتر النطاق إن وُضع من /scrape (يقلل استهلاك حد 121/ساعة)
+            from core.utils import apply_chapter_filter
+            chapters = apply_chapter_filter(chapters)
             existing = set(check_existing_chapters(metadata['title']))
             if not send([], bool(existing)):
                 return

@@ -49,7 +49,7 @@ from flask_cors import CORS
 from core.config import API_SECRET, SCHEDULER_CONFIG
 from core.registry import resolve_site, get_registry
 from core.backend import send_data_to_backend, check_existing_chapters  # noqa: F401
-from core.utils import generic_worker  # noqa: F401
+from core.utils import generic_worker, parse_chapter_spec_tokens, set_current_chapter_spec  # noqa: F401
 
 # استيراد حزمة المواقع يسجّل كل المواقع في السجل
 import sites  # noqa: F401
@@ -301,9 +301,21 @@ def trigger_scrape():
         data = request.json
         url = data.get('url', '').strip()
         admin_email = data.get('adminEmail')
+        chapters_spec = data.get('chapters')  # 🎯 نطاق انتقائي اختياري: "10-20" / "12,50" / "10-!"
 
         if not url:
             return jsonify({'message': 'No URL provided'}), 400
+
+        # 🎯 تحقق مبكر من بنية فلتر الفصول (قبل تشغيل العامل) — يُقبل نص أو قائمة أرقام
+        if chapters_spec is not None:
+            if isinstance(chapters_spec, (list, tuple)):
+                chapters_spec = ','.join(str(n).strip() for n in chapters_spec if str(n).strip())
+            if not isinstance(chapters_spec, str) or parse_chapter_spec_tokens(chapters_spec) is None:
+                return jsonify({
+                    'message': 'Invalid chapters filter',
+                    'hint': 'أمثلة صحيحة: "10" أو "12,50" أو "10-20" أو "10-!" أو "1-50,80,90-!"',
+                }), 400
+        chapters_spec = (chapters_spec or None)
 
         # البحث عن الموقع في السجل
         site = resolve_site(url)
@@ -332,14 +344,25 @@ def trigger_scrape():
                            '(مفاتيح مفصولة بفواصل) أو FLARESOLVR_URL. تفاصيل كل موقع في GET /sites'),
             }), 400
 
-        # تشغيل العامل في خيط منفصل
-        thread = threading.Thread(target=site['worker'], args=(url, admin_email, meta), daemon=True)
+        # تشغيل العامل في خيط منفصل — مع ضبط فلتر الفصول داخل الخيط (thread-local)
+        def _worker_with_chapter_spec(worker, w_url, w_email, w_meta, w_spec):
+            if w_spec:
+                set_current_chapter_spec(w_spec)
+            worker(w_url, w_email, w_meta)
+
+        thread = threading.Thread(
+            target=_worker_with_chapter_spec,
+            args=(site['worker'], url, admin_email, meta, chapters_spec),
+            daemon=True,
+        )
         thread.start()
 
         return jsonify({
-            'message': f"Scraping started ({site['name']}).",
+            'message': (f"Scraping started ({site['name']})."
+                        + (f" Chapters filter: {chapters_spec}" if chapters_spec else '')),
             'site': site['name'],
             'language': site['language'],
+            'chaptersFilter': chapters_spec,
         }), 200
 
     except Exception as e:
