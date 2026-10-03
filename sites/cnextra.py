@@ -32,6 +32,7 @@ import re
 import json
 import time
 import threading
+import requests
 from urllib.parse import urljoin, urlparse
 
 from core.registry import register_site
@@ -698,23 +699,42 @@ def fetch_metadata_cms(url):
                 cover = urljoin(cfg['base'] + '/', src)
                 break
 
-        # الوصف
+        # 🔥 الغلاف http يُحجب في الموقع (صفحات https) كمحتوى مختلط فيظهر فارغاً —
+        # كل نطاقات العائلة تخدم الصور عبر https أيضاً (bixiange/jpxs123 خلف Cloudflare)
+        if cover.startswith('http://'):
+            cover_https_test = 'https://' + cover[len('http://'):]
+            try:
+                chk = requests.head(cover_https_test, timeout=10, stream=True,
+                                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+                if chk.status_code < 400 and (chk.headers.get('Content-Type', '') or '').lower().startswith('image'):
+                    cover = cover_https_test
+            except Exception:
+                pass  # فشل فحص https → نُبقي http الأصلي
+
+        # الوصف — 🔥 وصف الميتا مبتور (~100 محرف يقف بنص السطر) فيصل المستخدم
+        # «مقتطفاً» — كتلة المقدمة الكاملة div.descInfo (وإن لم توجد: المنطق القديم)
         description = ''
-        if cfg['desc_from'] == 'meta':
-            desc_meta = get_meta(soup, name='description')
-            if desc_meta:
-                m = re.search(r'简介[：:]\s*(.+)$', desc_meta, re.S)
-                description = m.group(1).strip() if m else desc_meta.strip()
-        else:  # block — فقرة 作品简介
-            lines = page_text.split('\n')
-            for i, l in enumerate(lines):
-                if '作品简介' in l:
-                    rest = [x.strip() for x in lines[i + 1:i + 12] if x.strip()]
-                    description = '\n'.join(rest[:8])
-                    break
-            if not description:
-                m = re.search(r'简介[：:]\s*(.+)', page_text, re.S)
-                description = (m.group(1)[:600].strip() if m else '')
+        desc_info = soup.select_one('div.descInfo') or soup.select_one('.descInfo')
+        if desc_info:
+            description = desc_info.get_text('\n', strip=True)
+            description = re.sub(r'\r', '', description)
+            description = re.sub(r'\n{2,}', '\n', description).strip()
+        if not description:
+            if cfg['desc_from'] == 'meta':
+                desc_meta = get_meta(soup, name='description')
+                if desc_meta:
+                    m = re.search(r'简介[：:]\s*(.+)$', desc_meta, re.S)
+                    description = m.group(1).strip() if m else desc_meta.strip()
+            else:  # block — فقرة 作品简介
+                lines = page_text.split('\n')
+                for i, l in enumerate(lines):
+                    if '作品简介' in l:
+                        rest = [x.strip() for x in lines[i + 1:i + 12] if x.strip()]
+                        description = '\n'.join(rest[:8])
+                        break
+                if not description:
+                    m = re.search(r'简介[：:]\s*(.+)', page_text, re.S)
+                    description = (m.group(1)[:600].strip() if m else '')
 
         # التصنيف من مسار الرابط أو القائمة
         category = ''
