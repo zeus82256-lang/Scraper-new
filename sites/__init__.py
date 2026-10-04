@@ -18,3 +18,4 @@ from . import tomatomtl   # noqa: F401 — موقع مصادق (كوكيز حس�
 from . import wtrlab      # noqa: F401 — موقع مصادق جزئياً (كوكيز للفصول، البيانات مجانية)
 from . import cnextra     # noqa: F401 — 5 مواقع إضافية: Tadu/Bixiange/FFXS8/JPXS123/TaobaoJH
 from . import faloo_xsw   # noqa: F401 — موقعان إضافيان (v3.2): Faloo/XSW
+from . import newcn       # noqa: F401 — ثلاثة مواقع إضافية (v3.3): 85Novel/Shuqi/UUread
