@@ -37,6 +37,9 @@
 - POST /jhbook/cookies {cookies}                 (جديد: كوكيز جلسة تاوباو لقراءة الفصول)
 - GET  /jhbook/cookies                           (جديد: ملخص مخفى للكوكيز)
 - POST /jhbook/check                             (جديد: فحص حي لجلسة القراءة)
+- POST /faloo/cookies {cookies}                  (جديد v3.2: كوكيز اختيارية لفصول اشتراك Faloo)
+- GET  /faloo/cookies                            (جديد v3.2: ملخص مخفى للكوكيز)
+- POST /faloo/check                              (جديد v3.2: فحص حي — هل الفصول المشتراة تُقرأ؟)
 """
 
 import time
@@ -284,6 +287,47 @@ def check_jhbook_session_route():
     try:
         from sites.cnextra import jhbook_quick_session_check
         return jsonify(jhbook_quick_session_check()), 200
+    except Exception as e:
+        return jsonify({'ok': False, 'message': f'فحص داخلي فاشل: {str(e)[:120]}'}), 500
+
+
+# ==========================================
+# 🍪 كوكيز Faloo (اختيارية — تفتح فصول الاشتراك المشتراة بحساب)
+# ==========================================
+# POST /faloo/cookies {cookies: "name=v; ..."} — ضبط/تحديث (فارغ = وضع الزائر)
+# GET  /faloo/cookies                        — ملخص مخفى (مصدر الكوكيز + الأسماء)
+# POST /faloo/check                          — فحص حي: هل الفصول المشتراة تُقرأ فعلاً؟
+@app.route('/faloo/cookies', methods=['POST'])
+def set_faloo_cookies_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    try:
+        from sites.faloo_xsw import set_faloo_runtime_cookies, faloo_cookie_summary
+        data = request.json or {}
+        set_faloo_runtime_cookies(str(data.get('cookies') or ''))
+        return jsonify({'message': 'Faloo cookies updated', 'status': faloo_cookie_summary()}), 200
+    except Exception as e:
+        return jsonify({'message': 'Internal Server Error', 'details': str(e)}), 500
+
+
+@app.route('/faloo/cookies', methods=['GET'])
+def get_faloo_cookies_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    from sites.faloo_xsw import faloo_cookie_summary
+    return jsonify(faloo_cookie_summary()), 200
+
+
+@app.route('/faloo/check', methods=['POST'])
+def check_faloo_session_route():
+    auth_header = request.headers.get('Authorization') or request.headers.get('x-api-secret')
+    if auth_header != API_SECRET:
+        return jsonify({'message': 'Unauthorized'}), 401
+    try:
+        from sites.faloo_xsw import faloo_quick_session_check
+        return jsonify(faloo_quick_session_check()), 200
     except Exception as e:
         return jsonify({'ok': False, 'message': f'فحص داخلي فاشل: {str(e)[:120]}'}), 500
 
